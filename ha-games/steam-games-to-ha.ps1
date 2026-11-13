@@ -15,6 +15,11 @@ param(
 $WebhookUrl = 'http://192.168.1.133:8123/api/webhook/WEBHOOK_ID_HERE'
 # Optional: free key from https://www.steamgriddb.com/profile/preferences/api for art that Steam doesn't have
 $SteamGridDbKey = ''
+# Optional: Steam Web API key from https://steamcommunity.com/dev/apikey - adds games you own but haven't installed
+$SteamApiKey = ''
+# Other stores (installed + owned where the store keeps a local list)
+$IncludeEpic = $true
+$IncludeXbox = $true
 # ------------------------------------------
 
 $ErrorActionPreference = 'Stop'
@@ -59,7 +64,12 @@ if (Test-Path $lfPath) {
         $libraries += ($m.Groups[1].Value -replace '\\\\', '\')
     }
 }
-$libraries = $libraries | Select-Object -Unique
+# Same folder can appear with different case/slashes (registry vs libraryfolders.vdf)
+$seenLib = @{}
+$libraries = foreach ($l in $libraries) {
+    $key = ($l -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+    if (-not $seenLib.ContainsKey($key)) { $seenLib[$key] = $true; $l }
+}
 
 # Steam user: the one used most recently
 $userDir = Get-ChildItem (Join-Path $SteamPath 'userdata') -Directory -ErrorAction SilentlyContinue |
@@ -122,6 +132,7 @@ function Find-Cover([string]$name) {
 # ---------- Installed Steam games ----------
 $skipNames = '^(Steamworks Common Redistributables|Steam Linux Runtime.*|Proton.*|Steamworks Shared|SteamVR Performance Test)$'
 $games = New-Object System.Collections.Generic.List[object]
+$seenIds = @{}
 foreach ($lib in $libraries) {
     $apps = Join-Path $lib 'steamapps'
     if (-not (Test-Path $apps)) { continue }
@@ -133,6 +144,8 @@ foreach ($lib in $libraries) {
         $size = [double]([regex]::Match($t, '"SizeOnDisk"\s+"(\d+)"').Groups[1].Value)
         if (-not $appid -or -not $name -or $appid -eq '228980' -or $name -match $skipNames) { continue }
         if (($flags -band 4) -eq 0) { continue }   # not fully installed
+        if ($seenIds.ContainsKey($appid)) { continue }
+        $seenIds[$appid] = $true
         $games.Add([ordered]@{
             id = $appid
             name = $name
@@ -219,6 +232,167 @@ if ($userDir) {
             }
         } catch { Log "Couldn't read shortcuts.vdf: $($_.Exception.Message)" }
     }
+}
+
+
+# ---------- Mark everything so far as installed, launched through Steam ----------
+foreach ($g in $games) {
+    $g['installed'] = $true
+    $g['store'] = 'steam'
+    $g['launch'] = "steam://rungameid/$($g['id'])"
+    $g['install'] = ''
+}
+
+function Add-OrMerge($entry) {
+    # One entry per game: an installed copy (e.g. a Steam shortcut to an Epic game) wins over an uninstalled one
+    $key = Normalize $entry['name']
+    if (-not $key) { return }
+    $existing = $null
+    foreach ($g in $games) { if ((Normalize $g['name']) -eq $key) { $existing = $g; break } }
+    if ($null -eq $existing) { $games.Add($entry); return }
+    if (-not $existing['installed'] -and $entry['installed']) {
+        $games.Remove($existing) | Out-Null; $games.Add($entry); return
+    }
+    # Keep the existing (installed / Steam) entry, but borrow better art or the store name
+    if (-not $existing['cover'] -and $entry['cover']) { $existing['cover'] = $entry['cover'] }
+    if ($existing['src'] -eq 'shortcut' -and $entry['store'] -ne 'steam') { $existing['store'] = $entry['store'] }
+}
+
+# ---------- Steam: owned but not installed (needs $SteamApiKey) ----------
+if ($SteamApiKey -and $userDir) {
+    try {
+        $steamId64 = [decimal]76561197960265728 + [decimal]$userDir.Name
+        $url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=$SteamApiKey&steamid=$steamId64&include_appinfo=1&include_played_free_games=1"
+        $owned = (Invoke-RestMethod -Uri $url -TimeoutSec 20).response.games
+        $installedIds = @{}; foreach ($g in $games) { if ($g['src'] -eq 'steam') { $installedIds[[string]$g['id']] = $g } }
+        foreach ($o in $owned) {
+            $aid = [string]$o.appid
+            if ($installedIds.ContainsKey($aid)) {
+                if (-not $installedIds[$aid]['last_played'] -and $o.rtime_last_played) { $installedIds[$aid]['last_played'] = [long]$o.rtime_last_played }
+                continue
+            }
+            if ($o.name -match $skipNames) { continue }
+            Add-OrMerge ([ordered]@{
+                id = $aid; name = $o.name; src = 'steam'; store = 'steam'; installed = $false
+                size_gb = $null; last_played = [long]$o.rtime_last_played
+                cover = "https://cdn.cloudflare.steamstatic.com/steam/apps/$aid/library_600x900.jpg"
+                fallback = "https://cdn.cloudflare.steamstatic.com/steam/apps/$aid/header.jpg"
+                launch = "steam://rungameid/$aid"; install = "steam://install/$aid"
+            })
+        }
+        Log "Steam owned games: $(@($owned).Count)"
+    } catch { Log "Steam owned games failed: $($_.Exception.Message)" }
+}
+
+# ---------- Epic Games: installed (manifests) + owned (launcher catalogue cache) ----------
+if ($IncludeEpic) {
+    $epicData = Join-Path $env:ProgramData 'Epic\EpicGamesLauncher\Data'
+    $epicInstalled = @{}
+    try {
+        foreach ($f in Get-ChildItem (Join-Path $epicData 'Manifests') -Filter '*.item' -ErrorAction SilentlyContinue) {
+            $m = Get-Content -Raw -Encoding UTF8 $f.FullName | ConvertFrom-Json
+            if ($m.bIsIncompleteInstall -or -not $m.DisplayName) { continue }
+            if (@($m.AppCategories) -contains 'addons' -or @($m.AppCategories) -notcontains 'games') { continue }
+            $epicInstalled["$($m.CatalogNamespace):$($m.CatalogItemId)"] = $true
+            $uri = "com.epicgames.launcher://apps/$($m.CatalogNamespace)%3A$($m.CatalogItemId)%3A$($m.AppName)"
+            Add-OrMerge ([ordered]@{
+                id = "epic:$($m.AppName)"; name = $m.DisplayName; src = 'epic'; store = 'epic'; installed = $true
+                size_gb = [math]::Round([double]$m.InstallSize / 1GB, 1); last_played = 0
+                cover = ''; fallback = ''; launch = "$uri`?action=launch&silent=true"; install = ''
+                _ns = $m.CatalogNamespace; _cid = $m.CatalogItemId
+            })
+        }
+    } catch { Log "Epic manifests failed: $($_.Exception.Message)" }
+    try {
+        $cat = Join-Path $epicData 'Catalog\catcache.bin'
+        if (Test-Path $cat) {
+            $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content -Raw $cat).Trim()))
+            $items = $json | ConvertFrom-Json
+            $epicCovers = @{}
+            $n = 0
+            foreach ($it in $items) {
+                $paths = @($it.categories | ForEach-Object { $_.path })
+                $art = $null
+                foreach ($t in 'DieselGameBoxTall', 'OfferImageTall', 'DieselGameBox', 'Thumbnail') {
+                    $art = ($it.keyImages | Where-Object { $_.type -eq $t } | Select-Object -First 1).url
+                    if ($art) { break }
+                }
+                $epicCovers["$($it.namespace):$($it.id)"] = $art
+                if ($paths -notcontains 'games' -or $paths -contains 'addons' -or $paths -contains 'digitalextras' -or $paths -contains 'applications') { continue }
+                if ($it.mainGameItem) { continue }   # DLC / editions point at a main game
+                $appName = (@($it.releaseInfo) | Where-Object { @($_.platform) -contains 'Windows' } | Select-Object -First 1).appId
+                if (-not $appName) { continue }
+                if ($epicInstalled.ContainsKey("$($it.namespace):$($it.id)")) { continue }
+                $n++
+                Add-OrMerge ([ordered]@{
+                    id = "epic:$appName"; name = $it.title; src = 'epic'; store = 'epic'; installed = $false
+                    size_gb = $null; last_played = 0; cover = $art; fallback = ''
+                    launch = "com.epicgames.launcher://apps/$($it.namespace)%3A$($it.id)%3A$appName`?action=launch&silent=true"
+                    install = "com.epicgames.launcher://apps/$($it.namespace)%3A$($it.id)%3A$appName`?action=install"
+                })
+            }
+            # Art for installed Epic games
+            foreach ($g in $games) {
+                if ($g['_ns'] -and -not $g['cover']) { $g['cover'] = $epicCovers["$($g['_ns']):$($g['_cid'])"] }
+            }
+            Log "Epic library: $n not installed, $($epicInstalled.Count) installed"
+        }
+    } catch { Log "Epic catalogue failed: $($_.Exception.Message)" }
+    foreach ($g in $games) { if ($g.Contains('_ns')) { $g.Remove('_ns'); $g.Remove('_cid') } }
+}
+
+# ---------- Xbox app (PC Game Pass / Microsoft Store) installed games ----------
+if ($IncludeXbox) {
+    try {
+        $xcount = 0
+        foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
+            $root = $drive.Root
+            $folder = 'XboxGames'
+            $gr = Join-Path $root '.GamingRoot'
+            if (Test-Path $gr) {
+                # .GamingRoot: 'RGBX' header + UTF-16 folder name
+                $b = [System.IO.File]::ReadAllBytes($gr)
+                if ($b.Length -gt 8) { $f = [System.Text.Encoding]::Unicode.GetString($b, 8, $b.Length - 8).Trim([char]0); if ($f) { $folder = $f } }
+            }
+            $xdir = Join-Path $root $folder
+            if (-not (Test-Path $xdir)) { continue }
+            foreach ($gdir in Get-ChildItem $xdir -Directory -ErrorAction SilentlyContinue) {
+                $cfg = Join-Path $gdir.FullName 'Content\MicrosoftGame.config'
+                if (-not (Test-Path $cfg)) { continue }
+                [xml]$x = Get-Content -Raw -Encoding UTF8 $cfg
+                $g = $x.Game
+                $idName = $g.Identity.Name
+                $display = $g.ShellVisuals.DefaultDisplayName
+                if (-not $display -or $display -match '^ms-resource') { $display = $gdir.Name }
+                $appId = @($g.ExecutableList.Executable)[0].Id
+                $pkg = Get-AppxPackage -Name $idName -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $pkg -or -not $appId) { continue }
+                $storeId = $g.StoreId
+                $art = ''
+                if ($storeId) {
+                    $ck = "xbox:$storeId"
+                    if ($covers.ContainsKey($ck)) { $art = $covers[$ck] } else {
+                        try {
+                            $p = (Invoke-RestMethod -TimeoutSec 10 -Uri "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=$storeId&market=GB&languages=en-GB").Products[0]
+                            $imgs = $p.LocalizedProperties[0].Images
+                            $img = ($imgs | Where-Object { $_.ImagePurpose -eq 'Poster' } | Select-Object -First 1)
+                            if (-not $img) { $img = ($imgs | Where-Object { $_.ImagePurpose -eq 'BoxArt' } | Select-Object -First 1) }
+                            if ($img) { $art = 'https:' + $img.Uri }
+                        } catch { }
+                        $covers[$ck] = $art
+                    }
+                }
+                if (-not $art) { $art = Find-Cover $display }
+                $xcount++
+                Add-OrMerge ([ordered]@{
+                    id = "xbox:$($pkg.PackageFamilyName)"; name = $display; src = 'xbox'; store = 'xbox'; installed = $true
+                    size_gb = $null; last_played = 0; cover = $art; fallback = ''
+                    launch = "shell:AppsFolder\$($pkg.PackageFamilyName)!$appId"; install = ''
+                })
+            }
+        }
+        Log "Xbox installed games: $xcount"
+    } catch { Log "Xbox games failed: $($_.Exception.Message)" }
 }
 
 # Save cover cache
