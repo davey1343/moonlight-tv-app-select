@@ -25,6 +25,11 @@ $IncludeGamePass = $true
 $MaxLookupsPerRun = 250      # new Game Pass detail lookups per run; the rest fill in on later runs
 # Folders where Epic installs games (the new Epic launcher keeps no manifests in ProgramData)
 $EpicInstallFolders = @("$env:USERPROFILE\Epic Games", "$env:ProgramFiles\Epic Games")
+# Vibepollo: add every installed game as its own app, so Moonlight can start it directly.
+# Create a token in the Vibepollo web page (API Tokens) with these scopes, then paste it below:
+#   /api/apps  GET, POST      /api/apps/delete  POST
+$VibepolloUrl = 'https://localhost:47990'
+$VibepolloToken = ''
 # ------------------------------------------
 
 $ErrorActionPreference = 'Stop'
@@ -533,6 +538,87 @@ if ($IncludeGamePass) {
     } catch { Log "Game Pass failed: $($_.Exception.Message)" }
 }
 
+
+# ---------- Vibepollo: one app per installed game ----------
+# Apps this script manages have IDs starting 'bea57000-'; anything you added yourself is left alone.
+function Get-VpUuid([string]$key) {
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $h = -join ($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("beast:$key")) | ForEach-Object { $_.ToString('x2') })
+    return 'bea57000-{0}-4{1}-8{2}-{3}' -f $h.Substring(0, 4), $h.Substring(4, 3), $h.Substring(7, 3), $h.Substring(10, 12)
+}
+function Get-VpCover($g, [string]$uuid) {
+    $dir = Join-Path $ScriptDir 'vibepollo-covers'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    $png = Join-Path $dir "$uuid.png"
+    if (Test-Path $png) { return $png }
+    foreach ($url in @($g['cover'], $g['fallback'])) {
+        if (-not $url) { continue }
+        $tmp = Join-Path $env:TEMP "vp-cover-$uuid.img"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 15
+            Add-Type -AssemblyName System.Drawing
+            $img = [System.Drawing.Image]::FromFile($tmp)
+            try { $img.Save($png, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $img.Dispose() }
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+            return $png
+        } catch { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+    return ''
+}
+
+if ($VibepolloToken) {
+    $oldPolicy = [Net.ServicePointManager]::CertificatePolicy
+    try {
+        # Vibepollo uses a self-signed certificate; only trusted for these localhost calls
+        if (-not ('VpTrustAll' -as [type])) {
+            Add-Type @"
+using System.Net; using System.Security.Cryptography.X509Certificates;
+public class VpTrustAll : ICertificatePolicy { public bool CheckValidationResult(ServicePoint sp, X509Certificate c, WebRequest r, int p) { return true; } }
+"@
+        }
+        [Net.ServicePointManager]::CertificatePolicy = New-Object VpTrustAll
+        $vpHeaders = @{ Authorization = "Bearer $VibepolloToken" }
+        $existing = @{}
+        $resp = Invoke-RestMethod -Uri "$VibepolloUrl/api/apps" -Headers $vpHeaders -TimeoutSec 15
+        foreach ($a in @($resp.apps)) { if ($a.uuid) { $existing[[string]$a.uuid] = $a } }
+
+        $wanted = @{}; $added = 0; $updated = 0; $removed = 0
+        foreach ($g in $games) {
+            if (-not $g['installed'] -or -not $g['launch']) { continue }
+            $uuid = Get-VpUuid ("{0}:{1}" -f $g['src'], $g['id'])
+            if ($wanted.ContainsKey($uuid)) { continue }
+            $wanted[$uuid] = $true
+            $app = [ordered]@{
+                name = [string]$g['name']
+                uuid = $uuid
+                cmd = 'cmd /c start "" "' + $g['launch'] + '"'
+                'auto-detach' = $true
+                'wait-all' = $false
+            }
+            if ($g['src'] -eq 'steam') { $app['steam-id'] = [string]$g['id'] }   # lets Vibepollo follow the Steam game
+            $cover = Get-VpCover $g $uuid
+            if ($cover) { $app['image-path'] = $cover }
+            $g['vp'] = $true
+            $cur = $existing[$uuid]
+            if ($cur -and $cur.name -eq $app.name -and $cur.cmd -eq $app.cmd -and ([string]$cur.'image-path') -eq ([string]$app['image-path'])) { continue }
+            $body = [System.Text.Encoding]::UTF8.GetBytes(($app | ConvertTo-Json -Depth 3 -Compress))
+            Invoke-RestMethod -Method Post -Uri "$VibepolloUrl/api/apps" -Headers $vpHeaders -ContentType 'application/json' -Body $body -TimeoutSec 15 | Out-Null
+            if ($cur) { $updated++ } else { $added++ }
+        }
+        foreach ($uuid in @($existing.Keys)) {
+            if ($uuid -like 'bea57000-*' -and -not $wanted.ContainsKey($uuid)) {
+                $body = ([ordered]@{ uuid = $uuid } | ConvertTo-Json -Compress)
+                Invoke-RestMethod -Method Post -Uri "$VibepolloUrl/api/apps/delete" -Headers $vpHeaders -ContentType 'application/json' -Body $body -TimeoutSec 15 | Out-Null
+                $removed++
+            }
+        }
+        Log "Vibepollo: $($wanted.Count) game apps ($added added, $updated updated, $removed removed)"
+    } catch {
+        Log "Vibepollo sync failed: $($_.Exception.Message)"
+    } finally {
+        [Net.ServicePointManager]::CertificatePolicy = $oldPolicy
+    }
+}
 
 # Save cover cache
 try { $covers | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $CoverCache } catch { }

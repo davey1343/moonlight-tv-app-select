@@ -229,6 +229,7 @@ class GamesLibraryCard extends HTMLElement {
       this._busy = { key: this._key(g), name: g.name, at: Date.now() };
       const vars = { game_name: g.name };
       if (g.launch) vars.url = g.launch; else vars.game_id = String(g.id);
+      if (g.vp) vars.app = g.name;   // has its own Vibepollo app: Moonlight opens it directly
       this._script(this._config.play_script, vars);
     }
     this._renderGrid();
