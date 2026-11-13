@@ -1,0 +1,22 @@
+# Game list sent by steam-games-to-ha.ps1 on BEAST (installed Steam games + non-Steam games added to Steam).
+# Used by the Games page (custom:games-library-card) and script.pc_play_game.
+template:
+  - triggers:
+      - trigger: webhook
+        webhook_id: WEBHOOK_ID_HERE
+        allowed_methods: [POST]
+        local_only: true
+    sensor:
+      - name: BEAST games
+        unique_id: beast_games_library
+        icon: mdi:controller
+        state: "{{ (trigger.json.games | default([])) | count }}"
+        attributes:
+          games: "{{ trigger.json.games | default([]) }}"
+          updated: "{{ trigger.json.updated | default(now().isoformat()) }}"
+          host: "{{ trigger.json.host | default('') }}"
+
+recorder:
+  exclude:
+    entities:
+      - sensor.beast_games
