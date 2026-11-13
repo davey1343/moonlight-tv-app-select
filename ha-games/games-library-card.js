@@ -125,7 +125,7 @@ class GamesLibraryCard extends HTMLElement {
     const root = this.shadowRoot; if (!root || !this._hass) return;
     const grid = root.querySelector('.grid');
     const ent = this._hass.states[this._config.entity];
-    if (!ent) {
+    if (!ent || !this._games().length) {
       grid.innerHTML = `<div class="empty" style="grid-column:1/-1">No game list yet.<br>It arrives from BEAST when the PC is on — press Refresh.</div>`;
       return;
     }
