@@ -26,6 +26,7 @@ typedef struct {
     /** Allocated copy, may be NULL */
     char *def_app_name;
     bool def_app_launched;
+    int def_app_after_quit;     // app to launch once the game already running on the host has quit
     /** Retries host while it's booting, when an app was requested by launch params */
     lv_timer_t *def_app_wait_timer;
     int def_app_wait_count;

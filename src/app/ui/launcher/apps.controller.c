@@ -559,8 +559,17 @@ static void appload_loaded(apploader_list_t *apps, void *userdata) {
             }
         }
         if (app != NULL) {
-            commons_log_info("Apps", "Launching %s (%d) from launch params", app->base.name, app->base.id);
-            launcher_launch_game(fragment, app);
+            int running = pcmanager_server_current_app(pcmanager, &fragment->uuid);
+            if (running != 0 && running != app->base.id) {
+                // Another game is running on the host: quit it first, then launch this one (see quitgame_cb)
+                commons_log_info("Apps", "Quitting running app %d before launching %s (%d)", running,
+                                 app->base.name, app->base.id);
+                fragment->def_app_after_quit = app->base.id;
+                launcher_quit_game(fragment);
+            } else {
+                commons_log_info("Apps", "Launching %s (%d) from launch params", app->base.name, app->base.id);
+                launcher_launch_game(fragment, app);
+            }
         } else {
             commons_log_warn("Apps", "App from launch params not found (id=%d, name=%s)", fragment->def_app,
                              fragment->def_app_name ? fragment->def_app_name : "");
@@ -708,7 +717,20 @@ static void quitgame_cb(int result, const char *error, const uuidstr_t *uuid, vo
         controller->quit_progress = NULL;
     }
     lv_gridview_rebind(controller->applist);
+    int after_quit = controller->def_app_after_quit;
+    controller->def_app_after_quit = 0;
     if (result == GS_OK) {
+        if (after_quit != 0 && controller->apploader_apps != NULL) {
+            for (int i = 0; i < controller->apploader_apps->count; ++i) {
+                const apploader_item_t *item = &controller->apploader_apps->items[i];
+                if (item->base.id == after_quit) {
+                    commons_log_info("Apps", "Launching %s (%d) after quitting the running app", item->base.name,
+                                     item->base.id);
+                    launcher_launch_game(controller, item);
+                    break;
+                }
+            }
+        }
         return;
     }
     static const char *btn_texts[] = {translatable("OK"), ""};
