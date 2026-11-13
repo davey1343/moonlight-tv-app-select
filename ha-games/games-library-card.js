@@ -138,7 +138,9 @@ class GamesLibraryCard extends HTMLElement {
 
   _games() {
     const g = this._hass && this._hass.states[this._config.entity];
-    return (g && Array.isArray(g.attributes.games)) ? g.attributes.games : [];
+    if (!g) return [];
+    const a = g.attributes;
+    return [a.games, a.games2, a.games3, a.games4].filter(Array.isArray).flat();
   }
 
   _isInstalled(g) { return g.installed !== false; }

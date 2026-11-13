@@ -600,6 +600,10 @@ foreach ($g in $games) { if ($g.Contains('_msrating')) { $g.Remove('_msrating') 
 try { $covers | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $CoverCache } catch { }
 
 # ---------- Send ----------
+# Drop empty fields to keep the payload small
+foreach ($g in $games) {
+    foreach ($k in @($g.Keys)) { $v = $g[$k]; if ($null -eq $v -or ($v -is [string] -and $v -eq '') -or ($k -eq 'last_played' -and $v -eq 0)) { $g.Remove($k) } }
+}
 $sorted = $games | Sort-Object -Property @{ Expression = { $_.last_played }; Descending = $true }, @{ Expression = { $_.name } }
 $payload = [ordered]@{
     host = $env:COMPUTERNAME

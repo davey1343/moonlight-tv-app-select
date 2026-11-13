@@ -1,5 +1,6 @@
-# Game list sent by steam-games-to-ha.ps1 on BEAST (installed Steam games + non-Steam games added to Steam).
-# Used by the Games page (custom:games-library-card) and script.pc_play_game.
+# Game list sent by steam-games-to-ha.ps1 on BEAST (Steam, Epic, Xbox, PC Game Pass).
+# Split over games/games2/games3/games4 (250 each) because one attribute is capped at 262,144 characters.
+# Used by the Games page (custom:games-library-card), script.pc_play_game and the voice automation.
 template:
   - triggers:
       - trigger: webhook
@@ -12,7 +13,10 @@ template:
         icon: mdi:controller
         state: "{{ (trigger.json.games | default([])) | count }}"
         attributes:
-          games: "{{ trigger.json.games | default([]) }}"
+          games: "{{ (trigger.json.games | default([]))[0:250] }}"
+          games2: "{{ (trigger.json.games | default([]))[250:500] }}"
+          games3: "{{ (trigger.json.games | default([]))[500:750] }}"
+          games4: "{{ (trigger.json.games | default([]))[750:1000] }}"
           updated: "{{ trigger.json.updated | default(now().isoformat()) }}"
           host: "{{ trigger.json.host | default('') }}"
 
