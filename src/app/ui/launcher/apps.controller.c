@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include "logging.h"
+#include "stream/stats_reporter.h"
 #include <assert.h>
 
 #include "lvgl/lv_ext_utils.h"
@@ -72,6 +73,9 @@ static bool def_app_wait_show(apps_fragment_t *fragment);
 static void def_app_wait_stop(apps_fragment_t *fragment);
 
 static void def_app_wait_tick(lv_timer_t *timer);
+
+static const char *def_app_wait_reason(apps_fragment_t *fragment, const SERVER_STATE *state, char *detail,
+                                       size_t detail_size);
 
 static void appitem_bind(apps_fragment_t *controller, lv_obj_t *item, apploader_item_t *app);
 
@@ -901,13 +905,19 @@ static bool def_app_wait_show(apps_fragment_t *fragment) {
     const pclist_t *node = pcmanager_node(pcmanager, &fragment->uuid);
     const char *host = node != NULL && node->server != NULL && node->server->hostname != NULL ?
                        node->server->hostname : "your computer";
+    static char detail[256];
+    const SERVER_STATE *st = pcmanager_state(pcmanager, &fragment->uuid);
+    const char *reason = def_app_wait_reason(fragment, st, detail, sizeof(detail));
     snprintf(title, sizeof(title), "Waiting for %s\u2026", host);
-    if (fragment->def_app_name != NULL) {
-        snprintf(hint, sizeof(hint), "%s will start as soon as it's ready.", fragment->def_app_name);
-    } else {
-        snprintf(hint, sizeof(hint), "Your game will start as soon as it's ready.");
+    snprintf(hint, sizeof(hint), "%s will start as soon as it's ready. (%s, try %d of %d)",
+             fragment->def_app_name != NULL ? fragment->def_app_name : "Your game", reason,
+             fragment->def_app_wait_count + 1, DEF_APP_WAIT_MAX_TRIES);
+    show_error(fragment, title, hint, detail[0] ? detail : NULL);
+    // Report every third try (def_app_reported holds count + 1 so the first try is reported too)
+    if (fragment->def_app_wait_count % 3 == 0 && fragment->def_app_wait_count + 1 != fragment->def_app_reported) {
+        fragment->def_app_reported = fragment->def_app_wait_count + 1;
+        stats_reporter_status(host, fragment->def_app_name, reason, detail, fragment->def_app_wait_count);
     }
-    show_error(fragment, title, hint, NULL);
     set_actions(fragment, action_labels_offline, action_callbacks_offline);
     lv_btnmatrix_clear_btn_ctrl(fragment->actions, 0, LV_BTNMATRIX_CTRL_DISABLED);
 
@@ -942,10 +952,38 @@ static void def_app_wait_tick(lv_timer_t *timer) {
         return;
     }
     if (state->code == SERVER_STATE_AVAILABLE) {
-        if (apploader_state(fragment->apploader) == APPLOADER_STATE_ERROR) {
+        apploader_state_t ls = apploader_state(fragment->apploader);
+        if (ls == APPLOADER_STATE_ERROR || (ls == APPLOADER_STATE_IDLE && fragment->apploader_apps == NULL)) {
             apploader_load(fragment->apploader);
         }
+        update_view_state(fragment);
         return;
     }
     pcmanager_request_update(pcmanager, &fragment->uuid, host_info_cb, NULL);
+    update_view_state(fragment);
+}
+
+static const char *def_app_wait_reason(apps_fragment_t *fragment, const SERVER_STATE *state, char *detail,
+                                       size_t detail_size) {
+    detail[0] = '\0';
+    if (state == NULL) {
+        return "unknown host";
+    }
+    switch (state->code) {
+        case SERVER_STATE_OFFLINE:
+            return "offline";
+        case SERVER_STATE_ERROR:
+            snprintf(detail, detail_size, "%s", state->error.errmsg ? state->error.errmsg : "");
+            return "host error";
+        case SERVER_STATE_AVAILABLE:
+            if (apploader_state(fragment->apploader) == APPLOADER_STATE_ERROR) {
+                snprintf(detail, detail_size, "%s", fragment->apploader_error ? fragment->apploader_error : "");
+                return "app list failed";
+            }
+            return "loading apps";
+        case SERVER_STATE_NOT_PAIRED:
+            return "not paired";
+        default:
+            return "checking";
+    }
 }

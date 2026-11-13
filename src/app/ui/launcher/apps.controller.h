@@ -30,6 +30,7 @@ typedef struct {
     lv_timer_t *def_app_wait_timer;
     int def_app_wait_count;
     bool def_app_wol_sent;
+    int def_app_reported;
 
     bool show_hidden_apps;
 

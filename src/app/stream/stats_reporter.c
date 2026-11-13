@@ -185,6 +185,25 @@ void stats_reporter_stream_stopped(const char *reason) {
     enqueue(format_event("stop", extra), false);
 }
 
+void stats_reporter_status(const char *host, const char *app, const char *state, const char *detail, int attempt) {
+    if (report_url() == NULL) {
+        return;
+    }
+    char h[256], a[512], st[64], d[512];
+    json_escape(h, sizeof(h), host ? host : "");
+    json_escape(a, sizeof(a), app ? app : "");
+    json_escape(st, sizeof(st), state ? state : "");
+    json_escape(d, sizeof(d), detail ? detail : "");
+    size_t len = strlen(h) + strlen(a) + strlen(st) + strlen(d) + 128;
+    char *buf = malloc(len);
+    if (buf == NULL) {
+        return;
+    }
+    snprintf(buf, len, "{\"event\":\"status\",\"host\":\"%s\",\"app\":\"%s\",\"state\":\"%s\",\"detail\":\"%s\",\"attempt\":%d}",
+             h, a, st, d, attempt);
+    enqueue(buf, true);
+}
+
 void stats_reporter_set_hud(bool enabled) {
     bool changed = hud_on != enabled;
     hud_on = enabled;

@@ -46,3 +46,8 @@ void stats_reporter_push(const stream_stats_snapshot_t *snapshot);
  * Tell the receiver whether the performance bar is on, so a dashboard switch can show it.
  */
 void stats_reporter_set_hud(bool enabled);
+
+/**
+ * Send a status message before a stream starts (e.g. while waiting for the host), for troubleshooting.
+ */
+void stats_reporter_status(const char *host, const char *app, const char *state, const char *detail, int attempt);
