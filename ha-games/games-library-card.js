@@ -12,7 +12,7 @@ class GamesLibraryCard extends HTMLElement {
       refresh_entity: 'button.beast_refresh_game_list',
     }, config || {});
     this._q = '';
-    this._sort = this._load('sort', 'recent');
+    this._sort = this._load('sort', 'recent'); if (this._sort !== 'az') this._sort = 'recent';
     this._show = this._load('show', 'all');          // all | installed | not
     this._stores = this._load('stores', ['steam', 'epic', 'xbox']);
     this._busy = null;
@@ -74,8 +74,6 @@ class GamesLibraryCard extends HTMLElement {
       .ph{position:absolute;inset:0;display:grid;place-items:center;padding:12px;text-align:center;font-weight:800;font-size:15px;line-height:1.2;
           background:linear-gradient(160deg,rgba(90,110,255,.25),rgba(0,190,170,.12) 60%,rgba(255,160,0,.12));}
       .tag{z-index:2;position:absolute;left:6px;top:6px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.6);opacity:.9;letter-spacing:.02em}
-      .rt{z-index:2;position:absolute;right:6px;top:6px;font-size:10px;font-weight:800;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.6)}
-      .rt.hi{color:#8fd19e}.rt.mid{color:#e3c27a}.rt.lo{color:#e08a8a}
       .dl{z-index:2;position:absolute;inset:auto 0 0 0;padding:6px;text-align:center;font-size:11px;font-weight:700;background:linear-gradient(transparent,rgba(0,0,0,.75))}
       .nm{font-size:13px;font-weight:600;margin-top:7px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
       .sub{font-size:11px;opacity:.55;margin-top:2px}
@@ -103,10 +101,10 @@ class GamesLibraryCard extends HTMLElement {
     const input = root.querySelector('input');
     input.addEventListener('input', () => { this._q = input.value; this._renderGrid(); });
     const sortBtn = root.querySelector('.sort');
-    const sortLabel = () => { sortBtn.textContent = { recent: 'Recent', az: 'A–Z', rating: 'Top rated' }[this._sort] || 'Recent'; };
+    const sortLabel = () => { sortBtn.textContent = { recent: 'Recent', az: 'A–Z' }[this._sort] || 'Recent'; };
     sortLabel();
     sortBtn.addEventListener('click', () => {
-      this._sort = { recent: 'az', az: 'rating', rating: 'recent' }[this._sort] || 'recent'; this._save('sort', this._sort); sortLabel(); this._renderGrid();
+      this._sort = { recent: 'az', az: 'recent' }[this._sort] || 'recent'; this._save('sort', this._sort); sortLabel(); this._renderGrid();
     });
     root.querySelectorAll('.chip.show').forEach(ch => ch.addEventListener('click', () => {
       this._show = ch.dataset.v; this._save('show', this._show); this._renderChips(); this._renderGrid();
@@ -189,10 +187,6 @@ class GamesLibraryCard extends HTMLElement {
     });
     list.sort((a, b) => {
       if (this._sort === 'az') return String(a.g.name).localeCompare(String(b.g.name));
-      if (this._sort === 'rating') {
-        const ra = a.g.rating == null ? -1 : Number(a.g.rating), rb = b.g.rating == null ? -1 : Number(b.g.rating);
-        return rb - ra || (Number(b.g.rating_count) || 0) - (Number(a.g.rating_count) || 0) || String(a.g.name).localeCompare(String(b.g.name));
-      }
       const ia = this._isInstalled(a.g), ib = this._isInstalled(b.g);
       if (ia !== ib) return ia ? -1 : 1;                          // installed first
       return (Number(b.g.last_played) || 0) - (Number(a.g.last_played) || 0) || String(a.g.name).localeCompare(String(b.g.name));
@@ -209,7 +203,7 @@ class GamesLibraryCard extends HTMLElement {
       const cover = g.cover ? `<img loading="lazy" src="${this._esc(g.cover)}" data-fb="${this._esc(g.fallback || '')}" alt="">` : '';
       const busy = this._busy && this._busy.key === this._key(g) ? ' busy' : '';
       return `<div class="it${inst ? '' : ' ni'}${busy}" data-i="${i}">
-        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${inst ? "" : this._ratingBadge(g)}${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
+        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
         <div class="nm">${this._esc(g.name)}</div>${sub ? `<div class="sub">${sub}</div>` : ''}
       </div>`;
     }).join('');
@@ -222,14 +216,6 @@ class GamesLibraryCard extends HTMLElement {
   }
 
   _key(g) { return String(g.id); }
-
-  _ratingBadge(g) {
-    if (g.rating == null || g.rating === '') return '';
-    const r = Number(g.rating);
-    const cls = r >= 80 ? 'hi' : r >= 60 ? 'mid' : 'lo';
-    const src = g.rating_src === 'msstore' ? 'Microsoft Store' : 'Steam';
-    return `<div class="rt ${cls}" title="${r}% positive · ${Number(g.rating_count || 0).toLocaleString('en-GB')} ${src} reviews">${r}%</div>`;
-  }
 
   _tap(g) {
     if (this._busy && Date.now() - this._busy.at < 8000) return;
