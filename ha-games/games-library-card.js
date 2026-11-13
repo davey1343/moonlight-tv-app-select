@@ -9,6 +9,7 @@ class GamesLibraryCard extends HTMLElement {
       play_script: 'script.pc_play_game',
       install_script: 'script.pc_install_game',
       stop_script: 'script.gaming_stop',
+      end_stream_script: 'script.gaming_end_stream',
       refresh_entity: 'button.beast_refresh_game_list',
     }, config || {});
     this._q = '';
@@ -78,6 +79,24 @@ class GamesLibraryCard extends HTMLElement {
       .nm{font-size:13px;font-weight:600;margin-top:7px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
       .sub{font-size:11px;opacity:.55;margin-top:2px}
       .empty{opacity:.6;padding:40px 0;text-align:center;line-height:1.6}
+      .it{-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
+      .it img{-webkit-user-drag:none;pointer-events:none}
+      .hold{z-index:3;position:absolute;inset:auto 0 0 0;height:0;background:rgba(76,175,80,.35);pointer-events:none}
+      .it.holding .hold{height:100%;transition:height var(--hold,700ms) linear}
+      .it.ni.holding .hold{background:rgba(120,160,255,.35)}
+      .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:30;background:#1d2024;color:#c9ccd1;padding:9px 16px;border-radius:12px;font-size:13px;font-weight:600;opacity:0;transition:opacity .2s;pointer-events:none}
+      .toast.show{opacity:1}
+      .sd{display:none;position:fixed;inset:0;z-index:25;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px}
+      .sd.open{display:flex}
+      .sd .box{background:#16181c;border:1px solid #23262c;border-radius:18px;padding:18px;width:100%;max-width:380px;display:flex;flex-direction:column;gap:12px}
+      .sd .t{font-size:17px;font-weight:800}
+      .sd .hb{position:relative;overflow:hidden;border-radius:14px;padding:14px 16px;background:#1f2227;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;-webkit-touch-callout:none}
+      .sd .hb b{display:block;font-size:15px;position:relative;z-index:1}
+      .sd .hb span{display:block;font-size:12px;opacity:.6;margin-top:3px;position:relative;z-index:1}
+      .sd .hb::before{content:'';position:absolute;inset:0 auto 0 0;width:0;background:rgba(255,255,255,.12)}
+      .sd .hb.off::before{background:rgba(229,115,115,.35)}
+      .sd .hb.holding::before{width:100%;transition:width var(--hold,1200ms) linear}
+      .sd .cancel{text-align:center;padding:8px;opacity:.6;cursor:pointer;font-size:13px}
       .tp{display:none;position:fixed;inset:0;z-index:20;background:#0b0c0e;flex-direction:column;padding:10px;gap:10px;box-sizing:border-box;
           padding-top:max(10px,env(safe-area-inset-top));padding-bottom:max(10px,env(safe-area-inset-bottom))}
       .tp.open{display:flex}
@@ -113,6 +132,15 @@ class GamesLibraryCard extends HTMLElement {
       <div class="status"><div class="msg"></div><div class="btn stop">Stop gaming</div></div>
       <div class="grid"></div>
     </div>
+    <div class="sd">
+      <div class="box">
+        <div class="t">Stop gaming</div>
+        <div class="hb end"><b>End stream</b><span>Hold — closes Moonlight. The PC and TV stay on.</span></div>
+        <div class="hb off"><b>Shut down PC</b><span>Hold — ends the stream, turns the TV off and shuts BEAST down.</span></div>
+        <div class="cancel">Cancel</div>
+      </div>
+    </div>
+    <div class="toast"></div>
     <div class="tp">
       <div class="row">
         <div class="btn close">✕ Close</div>
@@ -147,16 +175,39 @@ class GamesLibraryCard extends HTMLElement {
     }));
     this._renderChips();
     root.querySelector('.refresh').addEventListener('click', () => this._refresh());
-    root.querySelector('.stop').addEventListener('click', () => {
-      if (confirm('Stop gaming? This closes Moonlight, turns the TV off and shuts BEAST down.')) this._script(this._config.stop_script, {});
-    });
+    const sd = root.querySelector('.sd');
+    root.querySelector('.stop').addEventListener('click', () => sd.classList.add('open'));
+    sd.querySelector('.cancel').addEventListener('click', () => sd.classList.remove('open'));
+    sd.addEventListener('click', (e) => { if (e.target === sd) sd.classList.remove('open'); });
+    this._holdify(sd.querySelector('.hb.end'), 1200, () => { sd.classList.remove('open'); this._script(this._config.end_stream_script, {}); this._toast('Ending the stream'); });
+    this._holdify(sd.querySelector('.hb.off'), 1200, () => { sd.classList.remove('open'); this._script(this._config.stop_script, {}); this._toast('Shutting down BEAST'); });
     this._setupPad(root);
-    root.querySelector('.grid').addEventListener('click', (e) => {
+    // Games: press and hold a cover to play (or install); a quick tap just shows a hint
+    const grid = root.querySelector('.grid');
+    let hold = null;
+    const cancelHold = () => { if (hold) { clearTimeout(hold.timer); hold.it.classList.remove('holding'); hold = null; } };
+    grid.addEventListener('contextmenu', (e) => { if (e.target.closest('.it')) e.preventDefault(); });
+    grid.addEventListener('pointerdown', (e) => {
       const it = e.target.closest('.it');
-      if (!it) return;
+      if (!it || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      cancelHold();
       const g = this._games()[Number(it.dataset.i)];
-      if (g) this._tap(g);
+      if (!g) return;
+      it.style.setProperty('--hold', '700ms');
+      it.classList.add('holding');
+      hold = { it, x: e.clientX, y: e.clientY, at: e.timeStamp, done: false,
+               timer: setTimeout(() => { hold.done = true; it.classList.remove('holding'); if (navigator.vibrate) navigator.vibrate(30); this._tap(g); }, 700) };
     });
+    grid.addEventListener('pointermove', (e) => { if (hold && Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 10) cancelHold(); });
+    grid.addEventListener('pointerup', () => {
+      if (hold && !hold.done) {
+        const it = hold.it, g = this._games()[Number(it.dataset.i)];
+        this._toast(g && !this._isInstalled(g) ? 'Hold to install' : 'Hold to play');
+      }
+      cancelHold();
+    });
+    grid.addEventListener('pointercancel', cancelHold);
+    grid.addEventListener('pointerleave', cancelHold);
   }
 
   // ---------- Touchpad for BEAST (talks straight to beast-touchpad.ps1 on the PC) ----------
@@ -285,6 +336,28 @@ class GamesLibraryCard extends HTMLElement {
     if (this._ws && this._ws.readyState === 1) this._ws.send(msg);
   }
 
+  // Press-and-hold button: fill animates while held, action runs when it completes
+  _holdify(el, ms, done) {
+    let t = null;
+    el.style.setProperty('--hold', ms + 'ms');
+    const stop = () => { clearTimeout(t); t = null; el.classList.remove('holding'); };
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      stop(); el.classList.add('holding');
+      t = setTimeout(() => { stop(); if (navigator.vibrate) navigator.vibrate(40); done(); }, ms);
+    });
+    el.addEventListener('pointerup', () => { if (t) this._toast('Keep holding to confirm'); stop(); });
+    el.addEventListener('pointerleave', stop);
+    el.addEventListener('pointercancel', stop);
+  }
+
+  _toast(msg) {
+    const el = this.shadowRoot.querySelector('.toast');
+    el.textContent = msg; el.classList.add('show');
+    clearTimeout(this._toastT); this._toastT = setTimeout(() => el.classList.remove('show'), 1800);
+  }
+
   _renderChips() {
     const root = this.shadowRoot;
     root.querySelectorAll('.chip.show').forEach(ch => ch.classList.toggle('on', ch.dataset.v === this._show));
@@ -360,7 +433,7 @@ class GamesLibraryCard extends HTMLElement {
       const cover = g.cover ? `<img loading="lazy" src="${this._esc(g.cover)}" data-fb="${this._esc(g.fallback || '')}" alt="">` : '';
       const busy = this._busy && this._busy.key === this._key(g) ? ' busy' : '';
       return `<div class="it${inst ? '' : ' ni'}${busy}" data-i="${i}">
-        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
+        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="hold"></div><div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
         <div class="nm">${this._esc(g.name)}</div>${sub ? `<div class="sub">${sub}</div>` : ''}
       </div>`;
     }).join('');
@@ -379,7 +452,7 @@ class GamesLibraryCard extends HTMLElement {
     const inst = this._isInstalled(g);
     if (!inst) {
       if (!g.install) { alert(`${g.name} can't be installed from here — open the store app on BEAST to install it.`); return; }
-      if (!confirm(`Install ${g.name} on BEAST?\n\nThis opens the store's install dialog on the PC — you'll need to confirm it there (or with the controller while streaming).`)) return;
+      this._toast(`Opening the installer for ${g.name} on BEAST — confirm it there`);
       this._busy = { key: this._key(g), name: g.name, at: Date.now() };
       this._script(this._config.install_script, { url: g.install, game_name: g.name });
     } else {
