@@ -20,6 +20,8 @@ $SteamApiKey = ''
 # Other stores (installed + owned where the store keeps a local list)
 $IncludeEpic = $true
 $IncludeXbox = $true
+# Folders where Epic installs games (the new Epic launcher keeps no manifests in ProgramData)
+$EpicInstallFolders = @("$env:USERPROFILE\Epic Games", "$env:ProgramFiles\Epic Games")
 # ------------------------------------------
 
 $ErrorActionPreference = 'Stop'
@@ -303,6 +305,44 @@ if ($IncludeEpic) {
             })
         }
     } catch { Log "Epic manifests failed: $($_.Exception.Message)" }
+    # New launcher: find installed games by their .egstore\*.mancpn marker in the install folders
+    try {
+        foreach ($root in $EpicInstallFolders) {
+            if (-not (Test-Path $root)) { continue }
+            foreach ($gdir in Get-ChildItem $root -Directory -ErrorAction SilentlyContinue) {
+                $eg = Join-Path $gdir.FullName '.egstore'
+                if (-not (Test-Path $eg)) { continue }
+                # Look for a small JSON file naming the game (old launcher: *.mancpn); otherwise use the folder name
+                $mc = $null
+                foreach ($f in Get-ChildItem $eg -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 65536 }) {
+                    try {
+                        $j = Get-Content -Raw -Encoding UTF8 $f.FullName | ConvertFrom-Json -ErrorAction Stop
+                        if ($j.AppName) { $mc = $j; break }
+                    } catch { }
+                }
+                if ($mc -and $mc.CatalogNamespace -and $mc.CatalogItemId) {
+                    $key = "$($mc.CatalogNamespace):$($mc.CatalogItemId)"
+                    $uri = "com.epicgames.launcher://apps/$($mc.CatalogNamespace)%3A$($mc.CatalogItemId)%3A$($mc.AppName)"
+                } else {
+                    $appName = if ($mc -and $mc.AppName) { $mc.AppName } else { $gdir.Name }
+                    $key = "app:$appName"
+                    $uri = "com.epicgames.launcher://apps/$appName"
+                    $mc = [pscustomobject]@{ AppName = $appName; CatalogNamespace = ''; CatalogItemId = '' }
+                }
+                if ($epicInstalled.ContainsKey($key)) { continue }
+                $epicInstalled[$key] = $true
+                $size = 0
+                try { $size = (Get-ChildItem $gdir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum } catch { }
+                Add-OrMerge ([ordered]@{
+                    id = "epic:$($mc.AppName)"; name = $gdir.Name; src = 'epic'; store = 'epic'; installed = $true
+                    size_gb = [math]::Round([double]$size / 1GB, 1); last_played = 0
+                    cover = (Find-Cover $gdir.Name); fallback = ''; launch = "$uri`?action=launch&silent=true"; install = ''
+                    _ns = $mc.CatalogNamespace; _cid = $mc.CatalogItemId
+                })
+            }
+        }
+        Log "Epic installed games found: $($epicInstalled.Count)"
+    } catch { Log "Epic install folders failed: $($_.Exception.Message)" }
     try {
         $cat = Join-Path $epicData 'Catalog\catcache.bin'
         if (Test-Path $cat) {
@@ -338,6 +378,47 @@ if ($IncludeEpic) {
             Log "Epic library: $n not installed, $($epicInstalled.Count) installed"
         }
     } catch { Log "Epic catalogue failed: $($_.Exception.Message)" }
+    # New Epic launcher (eglv2): owned library, catalogue art and installed sizes in %LOCALAPPDATA%\com.epicgames.eglv2\cache
+    try {
+        $egl = Join-Path $env:LOCALAPPDATA 'com.epicgames.eglv2\cache'
+        $libFile = Get-ChildItem (Join-Path $egl 'prod\account') -Recurse -Filter 'library-cache.json' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $catFile = Join-Path $egl 'prod\catalog-cache.json'
+        if ($libFile -and (Test-Path $catFile)) {
+            $lib = (Get-Content -Raw -Encoding UTF8 $libFile.FullName | ConvertFrom-Json).items
+            $catItems = (Get-Content -Raw -Encoding UTF8 $catFile | ConvertFrom-Json).items
+            $installedApps = @{}
+            $ds = Join-Path $egl 'disk-size-cache.json'
+            if (Test-Path $ds) {
+                foreach ($e in (Get-Content -Raw -Encoding UTF8 $ds | ConvertFrom-Json).entries) { $installedApps[$e.app_id.appName] = [double]$e.bytes }
+            }
+            $owned = 0; $inst = 0
+            foreach ($it in $lib) {
+                if ($it.owned -eq $false) { continue }
+                $a = $it.appId
+                $prop = $catItems.PSObject.Properties[$a.itemId]
+                if (-not $prop) { continue }
+                $c = $prop.Value.item
+                $paths = @($c.categories | ForEach-Object { $_.path })
+                if ($c.mainGameItem -or $paths -notcontains 'games' -or $paths -contains 'addons' -or $paths -contains 'digitalextras') { continue }
+                $art = $null
+                foreach ($t in 'DieselGameBoxTall', 'OfferImageTall', 'DieselGameBox', 'Thumbnail') {
+                    $art = (@($c.keyImages) | Where-Object { $_.type -eq $t } | Select-Object -First 1).url
+                    if ($art) { break }
+                }
+                $isInst = $installedApps.ContainsKey($a.appName) -or $epicInstalled.ContainsKey("$($a.namespaceId):$($a.itemId)") -or $epicInstalled.ContainsKey("app:$($a.appName)")
+                $uri = "com.epicgames.launcher://apps/$($a.namespaceId)%3A$($a.itemId)%3A$($a.appName)"
+                $size = $null; if ($installedApps.ContainsKey($a.appName)) { $size = [math]::Round($installedApps[$a.appName] / 1GB, 1) }
+                if ($isInst) { $inst++ } else { $owned++ }
+                Add-OrMerge ([ordered]@{
+                    id = "epic:$($a.appName)"; name = $it.title; src = 'epic'; store = 'epic'; installed = [bool]$isInst
+                    size_gb = $size; last_played = 0; cover = $art; fallback = ''
+                    launch = "$uri`?action=launch&silent=true"; install = $(if ($isInst) { '' } else { "$uri`?action=install" })
+                })
+            }
+            Log "Epic (new launcher): $inst installed, $owned owned not installed"
+        }
+    } catch { Log "Epic new launcher failed: $($_.Exception.Message)" }
     foreach ($g in $games) { if ($g.Contains('_ns')) { $g.Remove('_ns'); $g.Remove('_cid') } }
 }
 
