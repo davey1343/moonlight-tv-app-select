@@ -209,7 +209,7 @@ class GamesLibraryCard extends HTMLElement {
       const cover = g.cover ? `<img loading="lazy" src="${this._esc(g.cover)}" data-fb="${this._esc(g.fallback || '')}" alt="">` : '';
       const busy = this._busy && this._busy.key === this._key(g) ? ' busy' : '';
       return `<div class="it${inst ? '' : ' ni'}${busy}" data-i="${i}">
-        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${this._ratingBadge(g)}${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
+        <div class="ps"><div class="ph">${this._esc(g.name)}</div>${cover}<div class="tag">${g.gamepass && !inst ? 'Game Pass' : (label[this._store(g)] || 'Steam')}</div>${inst ? "" : this._ratingBadge(g)}${inst ? '' : '<div class="dl">⬇ Install</div>'}</div>
         <div class="nm">${this._esc(g.name)}</div>${sub ? `<div class="sub">${sub}</div>` : ''}
       </div>`;
     }).join('');
