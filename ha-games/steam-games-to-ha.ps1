@@ -20,6 +20,12 @@ $SteamApiKey = ''
 # Other stores (installed + owned where the store keeps a local list)
 $IncludeEpic = $true
 $IncludeXbox = $true
+# PC Game Pass catalogue (shown greyed out, install via the Xbox app)
+$IncludeGamePass = $true
+# User-review ratings (Steam user reviews, Microsoft Store rating as fallback)
+$IncludeRatings = $true
+$MaxLookupsPerRun = 250      # new web lookups per run; the rest fill in on later runs
+$RatingMaxAgeDays = 7
 # Folders where Epic installs games (the new Epic launcher keeps no manifests in ProgramData)
 $EpicInstallFolders = @("$env:USERPROFILE\Epic Games", "$env:ProgramFiles\Epic Games")
 # ------------------------------------------
@@ -245,18 +251,34 @@ foreach ($g in $games) {
     $g['install'] = ''
 }
 
+$script:gameIndex = $null
+function NormKey([string]$s) {
+    $k = Normalize $s
+    foreach ($suffix in 'standardedition', 'pcedition', 'windowsedition', 'forwindows', 'windows10', 'pc', 'gamepreview') {
+        if ($k.Length -gt $suffix.Length + 3 -and $k.EndsWith($suffix)) { $k = $k.Substring(0, $k.Length - $suffix.Length) }
+    }
+    return $k
+}
+
 function Add-OrMerge($entry) {
     # One entry per game: an installed copy (e.g. a Steam shortcut to an Epic game) wins over an uninstalled one
-    $key = Normalize $entry['name']
+    $key = NormKey $entry['name']
     if (-not $key) { return }
-    $existing = $null
-    foreach ($g in $games) { if ((Normalize $g['name']) -eq $key) { $existing = $g; break } }
-    if ($null -eq $existing) { $games.Add($entry); return }
+    if ($null -eq $script:gameIndex) {
+        $script:gameIndex = @{}
+        foreach ($g in $games) { $k = NormKey $g['name']; if ($k -and -not $script:gameIndex.ContainsKey($k)) { $script:gameIndex[$k] = $g } }
+    }
+    $existing = $script:gameIndex[$key]
+    if ($null -eq $existing) { $games.Add($entry); $script:gameIndex[$key] = $entry; return }
     if (-not $existing['installed'] -and $entry['installed']) {
-        $games.Remove($existing) | Out-Null; $games.Add($entry); return
+        foreach ($f in 'gamepass', '_msrating') { if ($existing[$f] -and -not $entry[$f]) { $entry[$f] = $existing[$f] } }
+        if (-not $entry['cover'] -and $existing['cover']) { $entry['cover'] = $existing['cover'] }
+        $games.Remove($existing) | Out-Null; $games.Add($entry); $script:gameIndex[$key] = $entry; return
     }
     # Keep the existing (installed / Steam) entry, but borrow better art or the store name
     if (-not $existing['cover'] -and $entry['cover']) { $existing['cover'] = $entry['cover'] }
+    if ($entry['gamepass']) { $existing['gamepass'] = $true; if (-not $existing['install'] -and -not $existing['installed']) { $existing['install'] = $entry['install'] } }
+    if (-not $existing['_msrating'] -and $entry['_msrating']) { $existing['_msrating'] = $entry['_msrating'] }
     if ($existing['src'] -eq 'shortcut' -and $entry['store'] -ne 'steam') { $existing['store'] = $entry['store'] }
 }
 
@@ -475,6 +497,104 @@ if ($IncludeXbox) {
         Log "Xbox installed games: $xcount"
     } catch { Log "Xbox games failed: $($_.Exception.Message)" }
 }
+
+# ---------- PC Game Pass catalogue ----------
+$script:lookups = 0
+function Can-Lookup { return $script:lookups -lt $MaxLookupsPerRun }
+if ($IncludeGamePass) {
+    try {
+        $sigl = Invoke-RestMethod -TimeoutSec 20 -Uri 'https://catalog.gamepass.com/sigls/v2?id=fdd9e2a7-0fee-49f6-ad69-4354098401ff&language=en-gb&market=GB'
+        $ids = @($sigl | Where-Object { $_.id } | ForEach-Object { $_.id })
+        $need = @($ids | Where-Object { -not $covers.ContainsKey("gp:$_") })
+        for ($i = 0; $i -lt $need.Count -and (Can-Lookup); $i += 20) {
+            $batch = $need[$i..([math]::Min($i + 19, $need.Count - 1))]
+            $script:lookups++
+            try {
+                $res = Invoke-RestMethod -TimeoutSec 20 -Uri ("https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=" + ($batch -join ',') + "&market=GB&languages=en-GB")
+                foreach ($pr in $res.Products) {
+                    $lp = $pr.LocalizedProperties[0]
+                    $img = ($lp.Images | Where-Object { $_.ImagePurpose -eq 'Poster' } | Select-Object -First 1)
+                    if (-not $img) { $img = ($lp.Images | Where-Object { $_.ImagePurpose -eq 'BoxArt' } | Select-Object -First 1) }
+                    $art = if ($img) { 'https:' + $img.Uri } else { '' }
+                    $u = $pr.MarketProperties[0].UsageData | Where-Object { $_.AggregateTimeSpan -eq 'AllTime' } | Select-Object -First 1
+                    $avg = if ($u) { [double]$u.AverageRating } else { 0 }
+                    $cnt = if ($u) { [int]$u.RatingCount } else { 0 }
+                    $covers["gp:$($pr.ProductId)"] = "$($lp.ProductTitle)|$art|$avg|$cnt"
+                }
+            } catch { Log "Game Pass details failed: $($_.Exception.Message)" }
+        }
+        $gpCount = 0
+        foreach ($id in $ids) {
+            $v = $covers["gp:$id"]
+            if (-not $v) { continue }
+            $parts = $v -split '\|'
+            if (-not $parts[0]) { continue }
+            $gpCount++
+            Add-OrMerge ([ordered]@{
+                id = "gp:$id"; name = $parts[0]; src = 'gamepass'; store = 'xbox'; installed = $false; gamepass = $true
+                size_gb = $null; last_played = 0; cover = $parts[1]; fallback = ''
+                launch = "msxbox://game/?productId=$id"; install = "msxbox://game/?productId=$id"
+                _msrating = $(if ([int]$parts[3] -ge 5) { "$([math]::Round([double]$parts[2] / 5 * 100))|$($parts[3])" } else { '' })
+            })
+        }
+        Log "Game Pass catalogue: $($ids.Count) games, $gpCount with details"
+    } catch { Log "Game Pass failed: $($_.Exception.Message)" }
+}
+
+# ---------- User-review ratings ----------
+function Find-SteamAppId([string]$name) {
+    $ck = "sid:$name"
+    if ($covers.ContainsKey($ck)) { return $covers[$ck] }
+    if (-not (Can-Lookup)) { return $null }
+    $script:lookups++
+    $found = ''
+    try {
+        $res = Invoke-RestMethod -TimeoutSec 10 -Uri ('https://store.steampowered.com/api/storesearch/?term=' + [uri]::EscapeDataString($name) + '&l=english&cc=GB')
+        $want = NormKey $name
+        foreach ($item in $res.items) { if ((NormKey $item.name) -eq $want) { $found = [string]$item.id; break } }
+    } catch { return $null }
+    $covers[$ck] = $found
+    return $found
+}
+
+function Get-SteamRating([string]$appid) {
+    $ck = "rt:$appid"
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($covers.ContainsKey($ck)) {
+        $p = $covers[$ck] -split '\|'
+        if ($now - [long]$p[2] -lt $RatingMaxAgeDays * 86400 -or -not (Can-Lookup)) { return $covers[$ck] }
+    }
+    if (-not (Can-Lookup)) { return $null }
+    $script:lookups++
+    try {
+        $r = Invoke-RestMethod -TimeoutSec 10 -Uri "https://store.steampowered.com/appreviews/$appid`?json=1&language=all&purchase_type=all&num_per_page=0"
+        $q = $r.query_summary
+        $val = if ($q.total_reviews -gt 0) { "$([math]::Round(100 * $q.total_positive / $q.total_reviews))|$($q.total_reviews)|$now" } else { "|0|$now" }
+        $covers[$ck] = $val
+        Start-Sleep -Milliseconds 300
+        return $val
+    } catch { return $null }
+}
+
+if ($IncludeRatings) {
+    $rated = 0
+    # Installed games first, then the rest
+    foreach ($g in ($games | Sort-Object { if ($_['installed']) { 0 } else { 1 } })) {
+        $appid = $null
+        if ($g['src'] -eq 'steam') { $appid = [string]$g['id'] } else { $appid = Find-SteamAppId $g['name'] }
+        $val = $null
+        if ($appid) { $val = Get-SteamRating $appid }
+        $p = if ($val) { $val -split '\|' } else { @() }
+        if ($p.Count -ge 2 -and $p[0] -ne '' -and [int]$p[1] -ge 10) {
+            $g['rating'] = [int]$p[0]; $g['rating_count'] = [int]$p[1]; $g['rating_src'] = 'steam'; $rated++
+        } elseif ($g['_msrating']) {
+            $m = $g['_msrating'] -split '\|'
+            $g['rating'] = [int]$m[0]; $g['rating_count'] = [int]$m[1]; $g['rating_src'] = 'msstore'; $rated++
+        }
+    }
+    Log "Ratings: $rated games rated, $($script:lookups) web lookups this run"
+}
+foreach ($g in $games) { if ($g.Contains('_msrating')) { $g.Remove('_msrating') } }
 
 # Save cover cache
 try { $covers | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $CoverCache } catch { }
