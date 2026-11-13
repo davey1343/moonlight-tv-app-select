@@ -38,6 +38,8 @@ typedef struct launcher_fragment_t {
 
     const app_launch_params_t *launch_params;
     bool def_host_selected;
+    /** Host picked from launch params (by UUID or name), valid when def_host_selected */
+    uuidstr_t def_host_uuid;
     bool def_app_requested;
 } launcher_fragment_t;
 

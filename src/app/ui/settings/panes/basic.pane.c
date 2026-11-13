@@ -152,6 +152,9 @@ static lv_obj_t *create_obj(lv_fragment_t *self, lv_obj_t *container) {
     lv_obj_set_width(language_dropdown, LV_PCT(100));
 #endif
 
+    pref_checkbox(view, locstr("Performance bar while streaming"), &app_configuration->stats_hud, false);
+    pref_desc_label(view, locstr("One line of stats at the top of the screen. Toggle while streaming with LB + left stick click."), false);
+
     update_bitrate_label(pane);
     update_bitrate_hint(pane);
 

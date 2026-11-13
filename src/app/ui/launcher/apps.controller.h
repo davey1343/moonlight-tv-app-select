@@ -23,7 +23,13 @@ typedef struct {
     uuidstr_t uuid;
 
     int def_app;
+    /** Allocated copy, may be NULL */
+    char *def_app_name;
     bool def_app_launched;
+    /** Retries host while it's booting, when an app was requested by launch params */
+    lv_timer_t *def_app_wait_timer;
+    int def_app_wait_count;
+    bool def_app_wol_sent;
 
     bool show_hidden_apps;
 
@@ -58,6 +64,7 @@ typedef struct {
     app_t *global;
     uuidstr_t host;
     int def_app;
+    const char *def_app_name;
 } apps_fragment_arg_t;
 
 extern const lv_fragment_class_t apps_controller_class;

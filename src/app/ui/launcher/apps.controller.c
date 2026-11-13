@@ -11,6 +11,11 @@
 #include "coverloader.h"
 #include "backend/apploader/apploader.h"
 #include <errors.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include "logging.h"
 #include <assert.h>
 
 #include "lvgl/lv_ext_utils.h"
@@ -59,6 +64,14 @@ static void applist_focus_enter(lv_event_t *event);
 static void applist_focus_leave(lv_event_t *event);
 
 static void update_view_state(apps_fragment_t *controller);
+
+static bool def_app_pending(const apps_fragment_t *fragment);
+
+static bool def_app_wait_show(apps_fragment_t *fragment);
+
+static void def_app_wait_stop(apps_fragment_t *fragment);
+
+static void def_app_wait_tick(lv_timer_t *timer);
 
 static void appitem_bind(apps_fragment_t *controller, lv_obj_t *item, apploader_item_t *app);
 
@@ -160,6 +173,7 @@ static void apps_controller_ctor(lv_fragment_t *self, void *args) {
     controller->global = arg->global;
     controller->uuid = arg->host;
     controller->def_app = arg->def_app;
+    controller->def_app_name = arg->def_app_name != NULL ? strdup(arg->def_app_name) : NULL;
     controller->apploader = apploader_create(arg->global, &controller->uuid, &controller->apploader_cb, controller);
 
     appitem_style_init(&controller->appitem_style);
@@ -169,6 +183,9 @@ static void apps_controller_dtor(lv_fragment_t *self) {
     apps_fragment_t *fragment = (apps_fragment_t *) self;
     appitem_style_deinit(&fragment->appitem_style);
     apploader_destroy(fragment->apploader);
+    def_app_wait_stop(fragment);
+    free(fragment->def_app_name);
+    fragment->def_app_name = NULL;
     if (fragment->apploader_apps != NULL) {
         apploader_list_free(fragment->apploader_apps);
     }
@@ -270,6 +287,9 @@ static void obj_will_delete(lv_fragment_t *self, lv_obj_t *obj) {
     apps_fragment_t *fragment = (apps_fragment_t *) self;
     apploader_cancel(fragment->apploader);
     fragment->def_app = 0;
+    def_app_wait_stop(fragment);
+    free(fragment->def_app_name);
+    fragment->def_app_name = NULL;
 }
 
 static void update_grid_config(apps_fragment_t *controller) {
@@ -391,6 +411,9 @@ static void update_view_state(apps_fragment_t *controller) {
                     break;
                 }
                 case APPLOADER_STATE_ERROR: {
+                    if (def_app_wait_show(controller)) {
+                        break;
+                    }
                     // apploader has error
                     show_error(controller, locstr("Failed to load apps"),
                                locstr("Press \"Retry\" to load again.\n\nRestart your computer if error persists."),
@@ -420,6 +443,9 @@ static void update_view_state(apps_fragment_t *controller) {
             break;
         }
         case SERVER_STATE_ERROR: {
+            if (def_app_wait_show(controller)) {
+                break;
+            }
             // server has error
             show_error(controller, locstr("Host error"),
                        locstr("Press \"Retry\" to load again.\n\nRestart your computer if error persists."),
@@ -431,6 +457,9 @@ static void update_view_state(apps_fragment_t *controller) {
             break;
         }
         case SERVER_STATE_OFFLINE: {
+            if (def_app_wait_show(controller)) {
+                break;
+            }
             // server has error
             show_error(controller, locstr("Offline"),
                        locstr("Press \"Wake\" to send Wake-on-LAN packet to turn the computer on if it supports this feature, "
@@ -509,17 +538,28 @@ static void appload_loaded(apploader_list_t *apps, void *userdata) {
     fragment->apploader_apps = apps;
     update_view_state(fragment);
 
-    if (fragment->def_app > 0 && !fragment->def_app_launched) {
+    if (def_app_pending(fragment)) {
         fragment->def_app_launched = true;
+        def_app_wait_stop(fragment);
         const apploader_item_t *app = NULL;
         for (int i = 0; i < apps->count; ++i) {
-            if (apps->items[i].base.id == fragment->def_app) {
-                app = &apps->items[i];
+            const apploader_item_t *item = &apps->items[i];
+            if (fragment->def_app > 0 && item->base.id == fragment->def_app) {
+                app = item;
+                break;
+            }
+            if (fragment->def_app_name != NULL && item->base.name != NULL &&
+                strcasecmp(item->base.name, fragment->def_app_name) == 0) {
+                app = item;
                 break;
             }
         }
         if (app != NULL) {
+            commons_log_info("Apps", "Launching %s (%d) from launch params", app->base.name, app->base.id);
             launcher_launch_game(fragment, app);
+        } else {
+            commons_log_warn("Apps", "App from launch params not found (id=%d, name=%s)", fragment->def_app,
+                             fragment->def_app_name ? fragment->def_app_name : "");
         }
     }
 }
@@ -825,4 +865,87 @@ static lv_gridview_data_change_t *apps_list_detect_change(const apploader_list_t
     }
     *num_changes = 0;
     return NULL;
+}
+
+/* ---- Waiting for the host when an app was requested by launch params ---- */
+
+/** Retry every 3 seconds, for up to 3 minutes (PC booting + Sunshine starting) */
+#define DEF_APP_WAIT_INTERVAL_MS 3000
+#define DEF_APP_WAIT_MAX_TRIES 60
+
+static bool def_app_pending(const apps_fragment_t *fragment) {
+    if (fragment->def_app_launched) {
+        return false;
+    }
+    return fragment->def_app > 0 || (fragment->def_app_name != NULL && fragment->def_app_name[0] != '\0');
+}
+
+static void def_app_wait_stop(apps_fragment_t *fragment) {
+    if (fragment->def_app_wait_timer != NULL) {
+        lv_timer_del(fragment->def_app_wait_timer);
+        fragment->def_app_wait_timer = NULL;
+    }
+}
+
+/**
+ * Show "Waiting for <host>" instead of the offline/error screen while an app from launch params is pending.
+ * @return true if the waiting screen is shown
+ */
+static bool def_app_wait_show(apps_fragment_t *fragment) {
+    if (!def_app_pending(fragment) || fragment->def_app_wait_count >= DEF_APP_WAIT_MAX_TRIES) {
+        def_app_wait_stop(fragment);
+        return false;
+    }
+    static char title[96];
+    static char hint[160];
+    const pclist_t *node = pcmanager_node(pcmanager, &fragment->uuid);
+    const char *host = node != NULL && node->server != NULL && node->server->hostname != NULL ?
+                       node->server->hostname : "your computer";
+    snprintf(title, sizeof(title), "Waiting for %s\u2026", host);
+    if (fragment->def_app_name != NULL) {
+        snprintf(hint, sizeof(hint), "%s will start as soon as it's ready.", fragment->def_app_name);
+    } else {
+        snprintf(hint, sizeof(hint), "Your game will start as soon as it's ready.");
+    }
+    show_error(fragment, title, hint, NULL);
+    set_actions(fragment, action_labels_offline, action_callbacks_offline);
+    lv_btnmatrix_clear_btn_ctrl(fragment->actions, 0, LV_BTNMATRIX_CTRL_DISABLED);
+
+    const SERVER_STATE *state = pcmanager_state(pcmanager, &fragment->uuid);
+    if (!fragment->def_app_wol_sent && state != NULL && state->code == SERVER_STATE_OFFLINE) {
+        // Wake it ourselves too, in case it wasn't started by Home Assistant
+        fragment->def_app_wol_sent = true;
+        pcmanager_send_wol(pcmanager, &fragment->uuid, send_wol_cb, NULL);
+    }
+    if (fragment->def_app_wait_timer == NULL) {
+        fragment->def_app_wait_timer = lv_timer_create(def_app_wait_tick, DEF_APP_WAIT_INTERVAL_MS, fragment);
+    }
+    return true;
+}
+
+static void def_app_wait_tick(lv_timer_t *timer) {
+    apps_fragment_t *fragment = timer->user_data;
+    if (!def_app_pending(fragment) || !fragment->base.managed->obj_created ||
+        fragment->base.managed->destroying_obj) {
+        def_app_wait_stop(fragment);
+        return;
+    }
+    fragment->def_app_wait_count++;
+    if (fragment->def_app_wait_count >= DEF_APP_WAIT_MAX_TRIES) {
+        commons_log_warn("Apps", "Gave up waiting for host after %d tries", fragment->def_app_wait_count);
+        def_app_wait_stop(fragment);
+        update_view_state(fragment);
+        return;
+    }
+    const SERVER_STATE *state = pcmanager_state(pcmanager, &fragment->uuid);
+    if (state == NULL || state->code == SERVER_STATE_QUERYING) {
+        return;
+    }
+    if (state->code == SERVER_STATE_AVAILABLE) {
+        if (apploader_state(fragment->apploader) == APPLOADER_STATE_ERROR) {
+            apploader_load(fragment->apploader);
+        }
+        return;
+    }
+    pcmanager_request_update(pcmanager, &fragment->uuid, host_info_cb, NULL);
 }

@@ -31,6 +31,13 @@ typedef struct {
     } stats_items;
     lv_obj_t *stats_pin;
     lv_obj_t *notice, *notice_label;
+    /** One-line performance bar (top centre) */
+    lv_obj_t *hud, *hud_label;
+    lv_timer_t *hud_shift_timer;
+    int hud_shift_index;
+    bool stream_open;
+    char host_name[128];
+    char app_name[256];
     lv_style_t overlay_button_style;
     lv_style_t overlay_button_style_focused;
     lv_style_t overlay_button_label_style;
@@ -59,5 +66,15 @@ bool streaming_overlay_shown();
 bool streaming_stats_shown();
 
 bool streaming_refresh_stats();
+
+/** Whether the one-line performance bar is switched on for this session */
+bool streaming_hud_enabled();
+
+struct stream_stats_snapshot_t;
+
+/** Collect the current stream stats in one place, for the bar and Home Assistant reports */
+void streaming_stats_snapshot(app_t *app, struct stream_stats_snapshot_t *snapshot);
+
+void streaming_hud_set_enabled(bool enabled);
 
 void streaming_notice_show(const char *message);

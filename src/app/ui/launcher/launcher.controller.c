@@ -1,6 +1,8 @@
 #include "app.h"
 #include "app_launch.h"
 
+#include <strings.h>
+
 #include "add.dialog.h"
 #include "apps.controller.h"
 #include "launcher.controller.h"
@@ -246,6 +248,8 @@ void on_pc_updated(const uuidstr_t *uuid, void *userdata) {
         lv_btn_set_icon(child, icon);
         break;
     }
+    // Host name may only be known once the host has answered, so try matching again
+    populate_selected_host(controller);
 }
 
 void on_pc_removed(const uuidstr_t *uuid, void *userdata) {
@@ -281,9 +285,11 @@ static void select_pc(launcher_fragment_t *controller, const uuidstr_t *uuid, bo
     if (uuid) {
         apps_fragment_arg_t arg = {.global = controller->global, .host = *uuid};
         const app_launch_params_t *params = controller->launch_params;
-        if (!controller->def_app_requested && params != NULL && uuidstr_t_equals_t(uuid, &params->default_host_uuid)) {
+        if (!controller->def_app_requested && controller->def_host_selected &&
+            app_launch_params_has_app(params) && uuidstr_t_equals_t(uuid, &controller->def_host_uuid)) {
             controller->def_app_requested = true;
             arg.def_app = params->default_app_id;
+            arg.def_app_name = params->default_app_name;
         }
         lv_fragment_t *fragment = lv_fragment_create(&apps_controller_class, &arg);
         lv_fragment_manager_replace(controller->base.child_manager, fragment, &controller->detail);
@@ -499,17 +505,32 @@ static void open_help(lv_event_t *event) {
     help_dialog_create();
 }
 
+static bool host_matches_launch_params(const pclist_t *node, const app_launch_params_t *params) {
+    if (!uuidstr_is_empty(&params->default_host_uuid)) {
+        return uuidstr_t_equals_t(&node->id, &params->default_host_uuid);
+    }
+    if (params->default_host_name == NULL || node->server == NULL || node->server->hostname == NULL) {
+        return false;
+    }
+    return strcasecmp(node->server->hostname, params->default_host_name) == 0;
+}
+
 static void populate_selected_host(launcher_fragment_t *controller) {
     // Easy and dirty way to select preferred host
-    if (controller->def_host_selected || controller->launch_params == NULL ||
-        uuidstr_is_empty(&controller->launch_params->default_host_uuid)) {
+    if (controller->def_host_selected || !app_launch_params_has_host(controller->launch_params)) {
         return;
     }
     for (const pclist_t *cur = pcmanager_servers(pcmanager); cur != NULL; cur = cur->next) {
-        if (uuidstr_t_equals_t(&cur->id, &controller->launch_params->default_host_uuid)) {
-            commons_log_info("UI", "Host %s was selected", cur->server->hostname);
-            pcmanager_select(pcmanager, &cur->id);
+        if (host_matches_launch_params(cur, controller->launch_params)) {
+            commons_log_info("UI", "Host %s was selected", cur->server ? cur->server->hostname : "(unknown)");
+            controller->def_host_uuid = cur->id;
             controller->def_host_selected = true;
+            pcmanager_select(pcmanager, &cur->id);
+            if (controller->pane_initialized) {
+                // Host only turned up after the launcher opened (e.g. via discovery), open it now
+                select_pc(controller, &cur->id, true);
+                set_detail_opened(controller, true);
+            }
             break;
         }
     }

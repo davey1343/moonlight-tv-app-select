@@ -206,6 +206,7 @@ int vdec_delegate_submit(PDECODE_UNIT decodeUnit) {
         memcpy(buffer + length, entry->data, entry->length);
         length += entry->length;
     }
+    vdec_temp_stats.receivedBytes += (uint32_t) length;
     SS4S_VideoFeedFlags flags = SS4S_VIDEO_FEED_DATA_FRAME_START | SS4S_VIDEO_FEED_DATA_FRAME_END;
     if (decodeUnit->frameType == FRAME_TYPE_IDR) {
         flags |= SS4S_VIDEO_FEED_DATA_KEYFRAME;
@@ -256,6 +257,7 @@ void vdec_stat_submit(const struct VIDEO_STATS *src, unsigned long now) {
     dst->totalFps = (float) dst->totalFrames / ((float) delta / 1000);
     dst->receivedFps = (float) dst->receivedFrames / ((float) delta / 1000);
     dst->decodedFps = (float) dst->submittedFrames / ((float) delta / 1000);
+    dst->bitrateMbps = (float) dst->receivedBytes * 8.0f / 1000.0f / (float) delta;
     LiGetEstimatedRttInfo(&dst->rtt, &dst->rttVariance);
     if (!streaming_stats_shown()) {
         return;

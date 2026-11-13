@@ -60,6 +60,8 @@ typedef struct app_settings_t {
     bool touchpad_natural_scroll;
     bool swap_abxy;
     bool syskey_capture;
+    /** One-line performance bar at the top of the stream */
+    bool stats_hud;
     bool hdr;
     bool hevc;
     bool av1;

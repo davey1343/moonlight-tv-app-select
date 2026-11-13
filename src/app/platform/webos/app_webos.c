@@ -36,6 +36,20 @@ void app_init_locale() {
     }
 }
 
+static char *launch_param_dup_string(jvalue_ref obj, const char *key) {
+    jvalue_ref value = jobject_get(obj, j_cstr_to_buffer(key));
+    if (!jis_string(value)) {
+        return NULL;
+    }
+    raw_buffer buf = jstring_get(value);
+    char *result = NULL;
+    if (buf.m_str != NULL && buf.m_len > 0) {
+        result = strndup(buf.m_str, buf.m_len);
+    }
+    jstring_free_buffer(buf);
+    return result;
+}
+
 app_launch_params_t *app_handle_launch(app_t *app, int argc, char *argv[]) {
     (void) app;
     if (argc < 2) {
@@ -63,7 +77,9 @@ app_launch_params_t *app_handle_launch(app_t *app, int argc, char *argv[]) {
     if (jis_string(host_uuid)) {
         raw_buffer buf = jstring_get(host_uuid);
         uuidstr_fromchars(&params->default_host_uuid, buf.m_len, buf.m_str);
+        jstring_free_buffer(buf);
     }
+    params->default_host_name = launch_param_dup_string(params_obj, "host");
     jvalue_ref host_app_id = jobject_get(params_obj, J_CSTR_TO_BUF("host_app_id"));
     if (jis_number(host_app_id)) {
         if (jnumber_get_i32(host_app_id, &params->default_app_id) != CONV_OK) {
@@ -72,12 +88,26 @@ app_launch_params_t *app_handle_launch(app_t *app, int argc, char *argv[]) {
     } else if (jis_string(host_app_id)) {
         raw_buffer buf = jstring_get(host_app_id);
         char *id_str = strndup(buf.m_str, buf.m_len);
+        jstring_free_buffer(buf);
         params->default_app_id = strtol(id_str, NULL, 10);
         if (params->default_app_id < 0) {
             params->default_app_id = 0;
         }
         free(id_str);
     }
+    params->default_app_name = launch_param_dup_string(params_obj, "app");
+    jvalue_ref overlay = jobject_get(params_obj, J_CSTR_TO_BUF("overlay"));
+    if (jis_boolean(overlay)) {
+        bool value = false;
+        if (jboolean_get(overlay, &value) == CONV_OK) {
+            params->overlay = value ? APP_LAUNCH_OVERLAY_ON : APP_LAUNCH_OVERLAY_OFF;
+        }
+    }
+    params->report_url = launch_param_dup_string(params_obj, "report_url");
+    commons_log_info("APP", "Launch params: host=%s, app=%s, app_id=%d, overlay=%d, report=%s",
+                     params->default_host_name ? params->default_host_name : "(uuid/none)",
+                     params->default_app_name ? params->default_app_name : "(none)",
+                     params->default_app_id, params->overlay, params->report_url ? "yes" : "no");
     jdomparser_release(&parser);
     return params;
 }

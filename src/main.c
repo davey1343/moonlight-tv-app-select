@@ -32,6 +32,7 @@ int main(int argc, char *argv[]) {
     }
 
     app_launch_params_t *params = app_handle_launch(&app, argc, argv);
+    app_launch_params_set_current(params);
 
     app_ui_open(&app.ui, true, params);
 

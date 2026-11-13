@@ -9,6 +9,11 @@
 #include "util/user_event.h"
 #include "util/i18n.h"
 #include "logging.h"
+#include "app_launch.h"
+#include "stream/stats_reporter.h"
+
+#include <stdio.h>
+#include <string.h>
 
 static void exit_streaming(lv_event_t *event);
 
@@ -40,6 +45,14 @@ static void update_buttons_layout(streaming_controller_t *controller);
 
 static void pin_toggle(lv_event_t *e);
 
+static void hud_create(streaming_controller_t *controller, lv_obj_t *view);
+
+static void hud_apply_visibility(streaming_controller_t *controller);
+
+static void hud_update(streaming_controller_t *controller);
+
+static void hud_shift_cb(lv_timer_t *timer);
+
 const lv_fragment_class_t streaming_controller_class = {
         .constructor_cb = constructor,
         .destructor_cb = controller_dtor,
@@ -52,6 +65,7 @@ const lv_fragment_class_t streaming_controller_class = {
 };
 
 static bool overlay_showing = false, overlay_pinned = false;
+static bool hud_enabled = false;
 static streaming_controller_t *current_controller = NULL;
 
 bool streaming_overlay_shown() {
@@ -59,7 +73,23 @@ bool streaming_overlay_shown() {
 }
 
 bool streaming_stats_shown() {
-    return overlay_showing || overlay_pinned;
+    return overlay_showing || overlay_pinned || hud_enabled || stats_reporter_active();
+}
+
+bool streaming_hud_enabled() {
+    return hud_enabled;
+}
+
+void streaming_hud_set_enabled(bool enabled) {
+    hud_enabled = enabled;
+    stats_reporter_set_hud(enabled);
+    streaming_controller_t *controller = current_controller;
+    if (controller != NULL) {
+        hud_apply_visibility(controller);
+        if (enabled) {
+            hud_update(controller);
+        }
+    }
 }
 
 bool streaming_refresh_stats() {
@@ -104,6 +134,7 @@ bool streaming_refresh_stats() {
         lv_label_set_text_fmt(controller->stats_items.host_latency, "-");
         lv_label_set_text_fmt(controller->stats_items.vdec_latency, "-");
     }
+    hud_update(controller);
     return true;
 }
 
@@ -128,11 +159,28 @@ static void constructor(lv_fragment_t *self, void *args) {
 
     const streaming_scene_arg_t *arg = (streaming_scene_arg_t *) args;
     controller->global = arg->global;
+
+    hud_enabled = arg->global->settings.stats_hud;
+    const app_launch_params_t *params = app_launch_params_current();
+    if (params != NULL && params->overlay == APP_LAUNCH_OVERLAY_ON) {
+        hud_enabled = true;
+    } else if (params != NULL && params->overlay == APP_LAUNCH_OVERLAY_OFF) {
+        hud_enabled = false;
+    }
+
+    const pclist_t *node = pcmanager_node(pcmanager, &arg->uuid);
+    snprintf(controller->host_name, sizeof(controller->host_name), "%s",
+             node != NULL && node->server != NULL && node->server->hostname != NULL ? node->server->hostname : "");
+    snprintf(controller->app_name, sizeof(controller->app_name), "%s", arg->app.name != NULL ? arg->app.name : "");
+    stats_reporter_set_hud(hud_enabled);
+
     app_session_begin(arg->global, &arg->uuid, &arg->app);
 }
 
 static void controller_dtor(lv_fragment_t *self) {
     streaming_controller_t *fragment = (streaming_controller_t *) self;
+    // Covers streams that ended without a normal close (errors, decoder failure)
+    stats_reporter_stream_stopped("ended");
     streaming_styles_reset(fragment);
     if (current_controller == fragment) {
         current_controller = NULL;
@@ -161,9 +209,15 @@ static bool on_event(lv_fragment_t *self, int code, void *userdata) {
             }
             lv_obj_add_flag(controller->overlay, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(controller->hint, LV_OBJ_FLAG_HIDDEN);
+            controller->stream_open = true;
+            hud_apply_visibility(controller);
+            stats_reporter_stream_started(controller->host_name, controller->app_name);
             break;
         }
         case USER_STREAM_CLOSE: {
+            controller->stream_open = false;
+            hud_apply_visibility(controller);
+            stats_reporter_stream_stopped("closed");
             controller->progress = progress_dialog_create(locstr("Disconnecting..."));
             lv_obj_add_flag(controller->overlay, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(controller->stats, LV_OBJ_FLAG_HIDDEN);
@@ -180,6 +234,10 @@ static bool on_event(lv_fragment_t *self, int code, void *userdata) {
         }
         case USER_OPEN_OVERLAY: {
             show_overlay(controller);
+            return true;
+        }
+        case USER_TOGGLE_STATS_HUD: {
+            streaming_hud_set_enabled(!hud_enabled);
             return true;
         }
         case USER_SIZE_CHANGED: {
@@ -222,6 +280,8 @@ static void on_view_created(lv_fragment_t *self, lv_obj_t *view) {
     controller->notice = notice;
     controller->notice_label = notice_label;
 
+    hud_create(controller, view);
+
     lv_obj_add_event_cb(controller->stats_pin, pin_toggle, LV_EVENT_VALUE_CHANGED, controller->stats);
 
 #if !defined(TARGET_WEBOS)
@@ -237,6 +297,15 @@ static void on_delete_obj(lv_fragment_t *self, lv_obj_t *view) {
     streaming_controller_t *controller = (streaming_controller_t *) self;
     if (controller->notice) {
         lv_obj_del(controller->notice);
+    }
+    if (controller->hud_shift_timer) {
+        lv_timer_del(controller->hud_shift_timer);
+        controller->hud_shift_timer = NULL;
+    }
+    if (controller->hud) {
+        lv_obj_del(controller->hud);
+        controller->hud = NULL;
+        controller->hud_label = NULL;
     }
     if (controller->stats->parent != controller->overlay) {
         lv_obj_del(controller->stats);
@@ -352,4 +421,158 @@ static void pin_toggle(lv_event_t *e) {
         lv_obj_set_parent(toggle_view, fragment->obj);
         lv_obj_clear_state(toggle_view, LV_STATE_USER_1);
     }
+}
+
+
+/* ---- One-line performance bar ---- */
+
+/* Dim colours, chosen to be easy on OLED panels */
+#define HUD_TEXT_COLOR 0x8A8A8A
+#define HUD_WARN_COLOR "B08A3A"
+#define HUD_BAD_COLOR "A84A4A"
+/* Move the bar a few pixels every couple of minutes so the same pixels aren't lit for hours */
+#define HUD_SHIFT_PERIOD_MS (120 * 1000)
+
+static const lv_point_t hud_shift_offsets[] = {
+        {0, 0}, {6, 2}, {-6, 4}, {3, 6}, {-3, 2}, {8, 4}, {-8, 6}, {0, 4},
+};
+
+static void hud_create(streaming_controller_t *controller, lv_obj_t *view) {
+    lv_obj_t *hud = lv_obj_create(lv_layer_sys());
+    lv_obj_remove_style_all(hud);
+    lv_obj_set_size(hud, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(hud, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(hud, LV_DPX(4), 0);
+    lv_obj_set_style_pad_hor(hud, LV_DPX(8), 0);
+    lv_obj_set_style_pad_ver(hud, LV_DPX(2), 0);
+    lv_obj_set_style_bg_color(hud, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(hud, LV_OPA_30, 0);
+    lv_obj_align(hud, LV_ALIGN_TOP_MID, 0, LV_DPX(6));
+
+    lv_obj_t *label = lv_label_create(hud);
+    lv_label_set_recolor(label, true);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_font(label, lv_theme_get_font_small(view), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(HUD_TEXT_COLOR), 0);
+    lv_label_set_text_static(label, "Waiting for stats…");
+
+    controller->hud = hud;
+    controller->hud_label = label;
+    controller->hud_shift_index = 0;
+    controller->hud_shift_timer = lv_timer_create(hud_shift_cb, HUD_SHIFT_PERIOD_MS, controller);
+    hud_apply_visibility(controller);
+}
+
+static void hud_apply_visibility(streaming_controller_t *controller) {
+    if (controller->hud == NULL) {
+        return;
+    }
+    if (hud_enabled && controller->stream_open) {
+        lv_obj_clear_flag(controller->hud, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(controller->hud, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void hud_shift_cb(lv_timer_t *timer) {
+    streaming_controller_t *controller = timer->user_data;
+    if (controller->hud == NULL) {
+        return;
+    }
+    int count = (int) (sizeof(hud_shift_offsets) / sizeof(hud_shift_offsets[0]));
+    controller->hud_shift_index = (controller->hud_shift_index + 1) % count;
+    const lv_point_t *offset = &hud_shift_offsets[controller->hud_shift_index];
+    lv_obj_align(controller->hud, LV_ALIGN_TOP_MID, offset->x, LV_DPX(6) + offset->y);
+}
+
+static const char *hud_resolution_name(int width, int height) {
+    static char buf[16];
+    if (height >= 2160) {
+        return "4K";
+    } else if (height >= 1440) {
+        return "1440p";
+    } else if (height > 0) {
+        snprintf(buf, sizeof(buf), "%dp", height);
+        return buf;
+    }
+    (void) width;
+    return NULL;
+}
+
+static void hud_update(streaming_controller_t *controller) {
+    stream_stats_snapshot_t snap;
+    streaming_stats_snapshot(controller->global, &snap);
+    stats_reporter_push(&snap);
+
+    if (controller->hud_label == NULL || !hud_enabled) {
+        return;
+    }
+
+    char latency[48];
+    const char *latency_color = NULL;
+    if (snap.total_latency_ms >= 80 || snap.drop_rate_pct >= 5) {
+        latency_color = HUD_BAD_COLOR;
+    } else if (snap.total_latency_ms >= 40 || snap.drop_rate_pct >= 1) {
+        latency_color = HUD_WARN_COLOR;
+    }
+    if (latency_color != NULL) {
+        snprintf(latency, sizeof(latency), "#%s ~%.0f ms#", latency_color, snap.total_latency_ms);
+    } else {
+        snprintf(latency, sizeof(latency), "~%.0f ms", snap.total_latency_ms);
+    }
+
+    char host[24], decode[24];
+    if (snap.host_latency_ms >= 0) {
+        snprintf(host, sizeof(host), "%.1f", snap.host_latency_ms);
+    } else {
+        snprintf(host, sizeof(host), "-");
+    }
+    if (snap.decode_latency_ms >= 0) {
+        snprintf(decode, sizeof(decode), "%.1f", snap.decode_latency_ms);
+    } else {
+        snprintf(decode, sizeof(decode), "-");
+    }
+
+    const char *res = hud_resolution_name(snap.width, snap.height);
+    lv_label_set_text_fmt(controller->hud_label,
+                          "%s  ·  %.0f fps  ·  %.0f Mbps  ·  %s%s%s  ·  net %u ms  ·  host %s  ·  dec %s  ·  drops %.1f%%",
+                          latency, snap.fps, snap.bitrate_mbps, res ? res : "", res ? " " : "",
+                          snap.format ? snap.format : "", snap.rtt_ms, host, decode, snap.drop_rate_pct);
+}
+
+
+void streaming_stats_snapshot(app_t *app, stream_stats_snapshot_t *snap) {
+    (void) app;
+    const struct VIDEO_STATS *dst = &vdec_summary_stats;
+    const struct VIDEO_INFO *info = &vdec_stream_info;
+    memset(snap, 0, sizeof(*snap));
+    snap->width = info->width;
+    snap->height = info->height;
+    snap->format = info->format;
+    snap->fps = dst->receivedFps;
+    snap->bitrate_mbps = dst->bitrateMbps;
+    snap->rtt_ms = dst->rtt;
+    snap->rtt_variance_ms = dst->rttVariance;
+    snap->host_latency_ms = -1;
+    snap->decode_latency_ms = -1;
+    if (dst->totalFrames > 0) {
+        snap->drop_rate_pct = (float) dst->networkDroppedFrames / (float) dst->totalFrames * 100.0f;
+    }
+    if (dst->submittedFrames > 0) {
+        if (info->has_host_latency) {
+            snap->host_latency_ms = (float) dst->totalCaptureLatency / (float) dst->submittedFrames / 10.0f;
+        }
+        if (info->has_decoder_latency) {
+            snap->decode_latency_ms = (float) dst->totalSubmitTimeUs / (float) dst->submittedFrames / 1000.0f +
+                                      dst->avgDecoderLatency;
+        }
+    }
+    float total = (float) dst->rtt / 2.0f;
+    if (snap->host_latency_ms > 0) {
+        total += snap->host_latency_ms;
+    }
+    if (snap->decode_latency_ms > 0) {
+        total += snap->decode_latency_ms;
+    }
+    snap->total_latency_ms = total;
 }

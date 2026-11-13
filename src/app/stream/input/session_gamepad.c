@@ -14,6 +14,7 @@
 
 #define QUIT_BUTTONS (PLAY_FLAG | BACK_FLAG | LB_FLAG | RB_FLAG)
 #define GAMEPAD_COMBO_VMOUSE (LB_FLAG | RS_CLK_FLAG)
+#define GAMEPAD_COMBO_STATS_HUD (LB_FLAG | LS_CLK_FLAG)
 
 #define TOUCHPAD_SECONDARY_CORNER 0.75f
 #define TOUCHPAD_TAP_THRESHOLD_MS 300u
@@ -54,6 +55,7 @@ struct session_input_touchpad_t {
 
 static bool quit_combo_pressed = false;
 static bool vmouse_combo_pressed = false;
+static bool hud_combo_pressed = false;
 
 static void release_buttons(stream_input_t *input, app_gamepad_state_t *gamepad);
 
@@ -244,6 +246,9 @@ void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButt
     } else if (gamepad_combo_check(gamepad->buttons, GAMEPAD_COMBO_VMOUSE)) {
         vmouse_combo_pressed = true;
         return;
+    } else if (gamepad_combo_check(gamepad->buttons, GAMEPAD_COMBO_STATS_HUD)) {
+        hud_combo_pressed = true;
+        return;
     }
     if (gamepad->buttons == 0) {
         if (quit_combo_pressed) {
@@ -255,6 +260,11 @@ void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButt
             vmouse_combo_pressed = false;
             release_buttons(input, gamepad);
             session_toggle_vmouse(input->session);
+            return;
+        } else if (hud_combo_pressed) {
+            hud_combo_pressed = false;
+            release_buttons(input, gamepad);
+            bus_pushevent(USER_TOGGLE_STATS_HUD, NULL, NULL);
             return;
         }
     }
