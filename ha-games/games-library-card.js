@@ -78,6 +78,20 @@ class GamesLibraryCard extends HTMLElement {
       .nm{font-size:13px;font-weight:600;margin-top:7px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
       .sub{font-size:11px;opacity:.55;margin-top:2px}
       .empty{opacity:.6;padding:40px 0;text-align:center;line-height:1.6}
+      .tp{display:none;position:fixed;inset:0;z-index:20;background:#0b0c0e;flex-direction:column;padding:10px;gap:10px;box-sizing:border-box;
+          padding-top:max(10px,env(safe-area-inset-top));padding-bottom:max(10px,env(safe-area-inset-bottom))}
+      .tp.open{display:flex}
+      .tp .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+      .tp .btn{background:#1a1c20;color:#c9ccd1}
+      .tp .dot{width:9px;height:9px;border-radius:50%;background:#7a5b2a;flex:none}
+      .tp .dot.ok{background:#3f7d4a}
+      .tp .st{flex:1;min-width:0;font-size:12px;color:#8a8d93;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .tp .area{flex:1;border-radius:16px;background:#121418;border:1px solid #1f2227;touch-action:none;position:relative;user-select:none;-webkit-user-select:none}
+      .tp .hint{position:absolute;inset:auto 0 14px 0;text-align:center;font-size:12px;color:#4b4f56;pointer-events:none;line-height:1.5}
+      .tp .mb{display:grid;grid-template-columns:1fr 1fr;gap:8px;height:64px}
+      .tp .mb div{border-radius:14px;background:#16181c;border:1px solid #1f2227;display:grid;place-items:center;color:#8a8d93;font-size:13px;font-weight:600;touch-action:none;user-select:none;-webkit-user-select:none}
+      .tp .mb div.down{background:#23262c}
+      .tp .kb{position:absolute;opacity:0;width:1px;height:1px;left:-100px;pointer-events:none}
     </style>
     <div class="wrap">
       <div class="bar">
@@ -85,6 +99,7 @@ class GamesLibraryCard extends HTMLElement {
         <input type="search" placeholder="Search games" />
         <div class="btn sort"></div>
         <div class="btn refresh" title="Ask BEAST to resend its game list">Refresh</div>
+        <div class="btn padbtn" title="Use this screen as a touchpad for BEAST">Touchpad</div>
       </div>
       <div class="filters">
         <div class="chip show" data-v="all">All</div>
@@ -97,6 +112,21 @@ class GamesLibraryCard extends HTMLElement {
       </div>
       <div class="status"><div class="msg"></div><div class="btn stop">Stop gaming</div></div>
       <div class="grid"></div>
+    </div>
+    <div class="tp">
+      <div class="row">
+        <div class="btn close">✕ Close</div>
+        <div class="dot"></div><div class="st">Connecting…</div>
+        <div class="btn key" data-k="esc">Esc</div>
+        <div class="btn key" data-k="enter">Enter</div>
+        <div class="btn key" data-k="back">⌫</div>
+        <div class="btn key" data-k="alt+tab">Alt+Tab</div>
+        <div class="btn key" data-k="win">Win</div>
+        <div class="btn kbd">⌨ Keyboard</div>
+      </div>
+      <div class="area"><div class="hint">Drag to move · tap to click · two-finger tap to right-click · two fingers to scroll</div></div>
+      <div class="mb"><div data-b="l">Left</div><div data-b="r">Right</div></div>
+      <input class="kb" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
     </div>`;
     const input = root.querySelector('input');
     input.addEventListener('input', () => { this._q = input.value; this._renderGrid(); });
@@ -120,12 +150,139 @@ class GamesLibraryCard extends HTMLElement {
     root.querySelector('.stop').addEventListener('click', () => {
       if (confirm('Stop gaming? This closes Moonlight, turns the TV off and shuts BEAST down.')) this._script(this._config.stop_script, {});
     });
+    this._setupPad(root);
     root.querySelector('.grid').addEventListener('click', (e) => {
       const it = e.target.closest('.it');
       if (!it) return;
       const g = this._games()[Number(it.dataset.i)];
       if (g) this._tap(g);
     });
+  }
+
+  // ---------- Touchpad for BEAST (talks straight to beast-touchpad.ps1 on the PC) ----------
+  _setupPad(root) {
+    const tp = root.querySelector('.tp'), area = tp.querySelector('.area'), kb = tp.querySelector('.kb');
+    const padBtn = root.querySelector('.padbtn');
+    if (!this._config.touchpad_key) { padBtn.style.display = 'none'; return; }
+    padBtn.addEventListener('click', () => this._padOpen(true));
+    tp.querySelector('.close').addEventListener('click', () => this._padOpen(false));
+    tp.querySelectorAll('.key').forEach(b => b.addEventListener('click', () => this._padSend('k ' + b.dataset.k)));
+    tp.querySelector('.kbd').addEventListener('click', () => { kb.value = ''; kb.focus(); });
+    kb.addEventListener('keydown', (e) => {
+      const map = { Enter: 'enter', Backspace: 'back', Escape: 'esc', Tab: 'tab', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+      if (map[e.key]) { e.preventDefault(); this._padSend('k ' + map[e.key]); }
+    });
+    kb.addEventListener('input', (e) => {
+      if (e.inputType === 'deleteContentBackward') this._padSend('k back');
+      else if (e.data) this._padSend('t ' + e.data);
+      else if (kb.value) this._padSend('t ' + kb.value);
+      kb.value = '';
+    });
+
+    // Mouse buttons: press and hold Left with one finger while moving with another to drag
+    tp.querySelectorAll('.mb div').forEach(b => {
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.classList.add('down'); this._padSend('bd ' + b.dataset.b); });
+      const up = () => { if (b.classList.contains('down')) { b.classList.remove('down'); this._padSend('bu ' + b.dataset.b); } };
+      b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('pointerleave', up);
+    });
+
+    // Pad gestures
+    const pts = new Map();
+    let acc = { x: 0, y: 0, w: 0 }, raf = 0, gesture = null;
+    const sens = Number(this._config.touchpad_speed || 1.6);
+    const flush = () => {
+      raf = 0;
+      const dx = Math.trunc(acc.x), dy = Math.trunc(acc.y), w = Math.trunc(acc.w);
+      let msg = [];
+      if (dx || dy) { msg.push(`m ${dx} ${dy}`); acc.x -= dx; acc.y -= dy; }
+      if (w) { msg.push(`w ${w}`); acc.w -= w; }
+      if (msg.length) this._padSend(msg.join('\n'));
+    };
+    const queue = () => { if (!raf) raf = requestAnimationFrame(flush); };
+    area.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      area.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, t: e.timeStamp });
+      if (pts.size === 1) gesture = { start: e.timeStamp, moved: 0, max: 1 };
+      else if (gesture) gesture.max = Math.max(gesture.max, pts.size);
+    });
+    area.addEventListener('pointermove', (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y, dt = Math.max(1, e.timeStamp - p.t);
+      p.x = e.clientX; p.y = e.clientY; p.t = e.timeStamp;
+      if (gesture) gesture.moved += Math.abs(dx) + Math.abs(dy);
+      if (pts.size === 1) {
+        const speed = Math.hypot(dx, dy) / dt;                 // px per ms
+        const f = sens * (1 + Math.min(speed, 2.5) * 0.9);      // light acceleration
+        acc.x += dx * f; acc.y += dy * f;
+      } else if (pts.size === 2) {
+        acc.w += -dy * 2.5;                                      // two fingers: scroll (half per finger)
+      }
+      queue();
+    });
+    const end = (e) => {
+      if (!pts.has(e.pointerId)) return;
+      pts.delete(e.pointerId);
+      if (pts.size === 0 && gesture) {
+        const quick = e.timeStamp - gesture.start < 250 && gesture.moved < 12;
+        if (quick) this._padSend(gesture.max >= 2 ? 'c r' : 'c l');
+        gesture = null;
+      }
+    };
+    area.addEventListener('pointerup', end);
+    area.addEventListener('pointercancel', end);
+  }
+
+  _padOpen(open) {
+    const tp = this.shadowRoot.querySelector('.tp');
+    tp.classList.toggle('open', open);
+    if (open) this._padConnect();
+    else { this._padWanted = false; clearTimeout(this._padRetry); if (this._ws) { try { this._ws.close(); } catch (e) {} this._ws = null; } }
+  }
+
+  _padStatus(text, ok) {
+    const tp = this.shadowRoot.querySelector('.tp');
+    tp.querySelector('.st').textContent = text;
+    tp.querySelector('.dot').classList.toggle('ok', !!ok);
+  }
+
+  _padConnect() {
+    this._padWanted = true;
+    if (location.protocol === 'https:') {
+      this._padStatus('The touchpad only works on home Wi-Fi: open Home Assistant at http://192.168.1.133:8123');
+      return;
+    }
+    if (this._ws && this._ws.readyState <= 1) return;
+    const url = (this._config.touchpad_url || 'ws://192.168.1.103:9876/') + '?k=' + encodeURIComponent(this._config.touchpad_key);
+    this._padStatus('Connecting to BEAST…');
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { this._padStatus('Couldn\'t connect: ' + e.message); return; }
+    this._ws = ws;
+    ws.onopen = () => {
+      this._padFails = 0;
+      this._padStatus('Connected to BEAST', true);
+      clearInterval(this._padPing);
+      this._padPing = setInterval(() => { if (ws.readyState === 1) ws.send('p'); }, 20000);
+    };
+    ws.onclose = () => {
+      clearInterval(this._padPing);
+      if (this._ws === ws) this._ws = null;
+      if (!this._padWanted) return;
+      this._padFails = (this._padFails || 0) + 1;
+      const pcOn = !['unavailable', 'unknown', undefined].includes(this._hass && this._hass.states['sensor.beast_cpuload'] && this._hass.states['sensor.beast_cpuload'].state);
+      if (!pcOn) this._padStatus('BEAST is off');
+      else if (this._padFails === 2) {
+        // Listener not running yet: the game-list refresh on BEAST starts it
+        this._padStatus('Starting the touchpad on BEAST…');
+        this._refresh();
+      } else this._padStatus(this._padFails > 6 ? 'Can\'t reach BEAST (check its firewall allowed PowerShell on private networks)' : 'Reconnecting…');
+      this._padRetry = setTimeout(() => this._padConnect(), this._padFails > 2 ? 5000 : 1500);
+    };
+  }
+
+  _padSend(msg) {
+    if (this._ws && this._ws.readyState === 1) this._ws.send(msg);
   }
 
   _renderChips() {

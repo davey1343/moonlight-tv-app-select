@@ -45,6 +45,25 @@ function Log($msg) {
     Write-Host $line
 }
 
+# ---------- Touchpad listener (beast-touchpad.ps1) ----------
+# The Games page in Home Assistant can work as a touchpad for this PC; make sure its listener is running.
+$TouchpadScript = Join-Path $ScriptDir 'beast-touchpad.ps1'
+if (-not $Install -and -not $Uninstall -and (Test-Path $TouchpadScript)) {
+    $listening = $false
+    try {
+        $tcp = New-Object Net.Sockets.TcpClient
+        $iar = $tcp.BeginConnect('127.0.0.1', 9876, $null, $null)
+        $listening = $iar.AsyncWaitHandle.WaitOne(500) -and $tcp.Connected
+        $tcp.Close()
+    } catch { }
+    if (-not $listening) {
+        try {
+            Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$TouchpadScript`"")
+            Log 'Started the touchpad listener'
+        } catch { Log "Couldn't start the touchpad listener: $($_.Exception.Message)" }
+    }
+}
+
 if ($Install -or $Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     if ($Uninstall) { Write-Host "Removed scheduled task '$TaskName'"; return }
@@ -275,6 +294,13 @@ function Add-OrMerge($entry) {
     if (-not $existing['installed'] -and $entry['installed']) {
         foreach ($f in 'gamepass') { if ($existing[$f] -and -not $entry[$f]) { $entry[$f] = $existing[$f] } }
         if (-not $entry['cover'] -and $existing['cover']) { $entry['cover'] = $existing['cover'] }
+        $games.Remove($existing) | Out-Null; $games.Add($entry); $script:gameIndex[$key] = $entry; return
+    }
+    # A game added to Steam as a non-Steam shortcut that is also installed in its own launcher (Epic / Xbox):
+    # launch it through its own launcher instead of through Steam
+    if ($existing['src'] -eq 'shortcut' -and $entry['installed'] -and $entry['store'] -in @('epic', 'xbox')) {
+        if (-not $entry['cover'] -and $existing['cover']) { $entry['cover'] = $existing['cover'] }
+        if ([long]$existing['last_played'] -gt [long]$entry['last_played']) { $entry['last_played'] = $existing['last_played'] }
         $games.Remove($existing) | Out-Null; $games.Add($entry); $script:gameIndex[$key] = $entry; return
     }
     # Keep the existing (installed / Steam) entry, but borrow better art or the store name
