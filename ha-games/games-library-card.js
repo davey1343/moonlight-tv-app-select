@@ -57,11 +57,11 @@ class GamesLibraryCard extends HTMLElement {
       .it:active .ps{transform:scale(.97)}
       .it.busy .ps{outline:2px solid rgba(76,175,80,.7)}
       .ps{aspect-ratio:2/3;border-radius:12px;overflow:hidden;background:rgba(255,255,255,.06);box-shadow:0 6px 18px rgba(0,0,0,.35);transition:transform .15s;position:relative}
-      .ps img{width:100%;height:100%;object-fit:cover;display:block}
+      .ps img{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:cover;display:block}
       .ps img.wide{object-fit:cover;object-position:center}
       .ph{position:absolute;inset:0;display:grid;place-items:center;padding:12px;text-align:center;font-weight:800;font-size:15px;line-height:1.2;
           background:linear-gradient(160deg,rgba(90,110,255,.25),rgba(0,190,170,.12) 60%,rgba(255,160,0,.12));}
-      .tag{position:absolute;left:6px;top:6px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.55);opacity:.85}
+      .tag{z-index:2;position:absolute;left:6px;top:6px;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.55);opacity:.85}
       .nm{font-size:13px;font-weight:600;margin-top:7px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
       .sub{font-size:11px;opacity:.55;margin-top:2px}
       .empty{opacity:.6;padding:40px 0;text-align:center;line-height:1.6}
